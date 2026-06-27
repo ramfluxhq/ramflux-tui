@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Span Brain
+
 mod a2ui_render;
 mod app;
 mod bus;
@@ -13,8 +14,8 @@ pub use app::TuiApp;
 pub use bus::{SdkLocalBus, TuiBus};
 pub use error::TuiError;
 pub use state::{
-    ApprovalRow, ContactRow, ConversationRow, GroupRow, InputMode, MessageRow, Panel, TuiInput,
-    TuiState,
+    ApprovalRow, AttachmentRow, ContactRow, ConversationRow, DeviceRow, GroupRow, InputMode,
+    MessageReceiptRow, MessageRow, ObjectTransferRow, Panel, PendingAttachment, TuiInput, TuiState,
 };
 
 /// Converts one terminal key code into a TUI input event.

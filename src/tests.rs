@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Span Brain
+
 #![cfg(test)]
 
 use async_trait::async_trait;
@@ -19,6 +20,7 @@ struct MockBus {
 
 #[derive(Clone, Debug)]
 struct MockRequest {
+    account_id: Option<String>,
     sdk_api: String,
     method: String,
     body: serde_json::Value,
@@ -26,14 +28,16 @@ struct MockRequest {
 
 #[async_trait]
 impl TuiBus for MockBus {
+    #[allow(clippy::too_many_lines)]
     async fn request(
         &mut self,
-        _account_id: Option<String>,
+        account_id: Option<String>,
         sdk_api: &str,
         method: &str,
         body: serde_json::Value,
     ) -> Result<serde_json::Value, TuiError> {
         self.requests.push(MockRequest {
+            account_id,
             sdk_api: sdk_api.to_owned(),
             method: method.to_owned(),
             body: body.clone(),
@@ -67,6 +71,40 @@ impl TuiBus for MockBus {
                 "fingerprint_hex": "f00d",
                 "verification_state": "verified"
             }),
+            "contact.add" | "contact.accept" => serde_json::json!({
+                "link_id": body.get("link_id").cloned().unwrap_or(serde_json::Value::Null),
+                "requester_id": body.get("requester_id").cloned().unwrap_or(serde_json::Value::Null),
+                "target_id": body.get("target_id").cloned().unwrap_or(serde_json::Value::Null),
+                "state": "accepted",
+            }),
+            "device.list" => serde_json::json!({
+                "principal_id": "principal_tui_alice",
+                "local_device_id": "device_tui_alice_b",
+                "devices": [{
+                    "device_id": "device_tui_alice_a",
+                    "device_epoch": 1,
+                    "target_delivery_id": "target_tui_alice_a",
+                    "is_local": false
+                }, {
+                    "device_id": "device_tui_alice_b",
+                    "device_epoch": 2,
+                    "target_delivery_id": "target_tui_alice_b",
+                    "is_local": true
+                }]
+            }),
+            "device.activate" => serde_json::json!({
+                "device_id": body.get("device_id").cloned().unwrap_or(serde_json::Value::Null),
+                "devices": [{
+                    "device_id": "device_tui_alice_b",
+                    "device_epoch": 2,
+                    "target_delivery_id": "target_tui_alice_b",
+                    "is_local": true
+                }]
+            }),
+            "device.revoke" => serde_json::json!({
+                "device_id": body.get("device_id").cloned().unwrap_or(serde_json::Value::Null),
+                "revoked": true
+            }),
             "group.list" => serde_json::json!({
                 "groups": [{
                     "group_id": "group_tui_1",
@@ -81,6 +119,41 @@ impl TuiBus for MockBus {
             "a2ui.action" => serde_json::json!({"accepted": true}),
             "grant.approve" | "grant.deny" => serde_json::json!({"ok": true}),
             "message.submit" => serde_json::json!({"submitted": true}),
+            "message.receive" => serde_json::json!({
+                "entries": [],
+                "decrypted_messages": [{
+                    "message_id": "env_tui_attach_1",
+                    "sender_id": "bob",
+                    "plaintext_body_base64": ramflux_protocol::encode_base64url(b"attachment received"),
+                    "attachments": [{
+                        "object_id": "object_tui_attach_1",
+                        "plaintext_base64": ramflux_protocol::encode_base64url(b"attachment bytes")
+                    }]
+                }]
+            }),
+            "object.put" => mock_transfer("object_tui_put", "upload", "in_progress", 512, 1024, 50),
+            "object.get" => serde_json::json!({
+                "object_id": "object_tui_get",
+                "plaintext_base64": ramflux_protocol::encode_base64url(b"object bytes")
+            }),
+            "object.transfer.status" => {
+                let object_id = body
+                    .get("object_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("object_tui_status");
+                let direction =
+                    body.get("direction").and_then(serde_json::Value::as_str).unwrap_or("upload");
+                mock_transfer(object_id, direction, "in_progress", 512, 1024, 50)
+            }
+            "object.transfer.resume" => {
+                let object_id = body
+                    .get("object_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("object_tui_resume");
+                let direction =
+                    body.get("direction").and_then(serde_json::Value::as_str).unwrap_or("upload");
+                mock_transfer(object_id, direction, "complete", 1024, 1024, 100)
+            }
             "message.delete" => serde_json::json!({"deleted": true}),
             "message.receipt.delivered" | "message.receipt.read" => {
                 serde_json::json!({"scope": "local_projection"})
@@ -98,6 +171,19 @@ impl TuiBus for MockBus {
                 "mute_until": body.get("mute_until").cloned().unwrap_or(serde_json::Value::Null)
             }),
             "subscription.open" => serde_json::json!({"subscribed": true}),
+            "account.status" => serde_json::json!({
+                "local_account_id": "alice_account",
+                "principal_id": "principal_tui_alice",
+                "device_id": "device_tui_alice",
+                "target_delivery_id": "target_tui_alice",
+            }),
+            "account.switch" => serde_json::json!({
+                "active_account_id": self
+                    .requests
+                    .last()
+                    .and_then(|request| request.account_id.clone())
+                    .unwrap_or_else(|| "unknown".to_owned())
+            }),
             _ => serde_json::json!({}),
         })
     }
@@ -107,6 +193,33 @@ impl TuiBus for MockBus {
             .pop_front()
             .ok_or_else(|| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("no event".to_owned())))
     }
+}
+
+fn mock_transfer(
+    object_id: &str,
+    direction: &str,
+    state: &str,
+    done_bytes: u64,
+    total_bytes: u64,
+    percent: u32,
+) -> serde_json::Value {
+    serde_json::json!({
+        "transfer": {
+            "transfer_id": format!("{direction}:{object_id}:mock"),
+            "object_id": object_id,
+            "manifest_hash": "mock_manifest",
+            "direction": direction,
+            "state": state,
+            "total_bytes": total_bytes,
+            "done_bytes": done_bytes,
+            "total_chunks": 2,
+            "completed_chunks": if percent == 100 { 2 } else { 1 },
+            "next_chunk_index": if percent == 100 { serde_json::Value::Null } else { serde_json::json!(1) },
+            "percent": percent,
+            "last_error": serde_json::Value::Null,
+            "updated_at": 1
+        }
+    })
 }
 
 fn mock_approvals() -> serde_json::Value {
@@ -147,6 +260,11 @@ async fn renders_conversations_messages_contacts_and_groups() -> Result<(), TuiE
     let buffer = buffer_text(&terminal);
 
     assert!(buffer.contains("Default DM"));
+    app.state.selected_panel = Panel::Messages;
+    terminal
+        .draw(|frame| app.render(frame))
+        .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
+    let buffer = buffer_text(&terminal);
     assert!(buffer.contains("hello from bus"));
     app.state.selected_panel = Panel::Contacts;
     terminal
@@ -182,13 +300,47 @@ async fn contact_panel_loads_safety_number_and_marks_verified() -> Result<(), Tu
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Contacts;
 
-    app.handle_input(&mut bus, TuiInput::Char('s')).await?;
+    app.handle_input(&mut bus, TuiInput::Char('S')).await?;
     assert_eq!(app.state.contacts[0].fingerprint_hex.as_deref(), Some("f00d"));
     assert_eq!(app.state.contacts[0].verification_state, "unverified");
 
-    app.handle_input(&mut bus, TuiInput::Char('v')).await?;
+    app.handle_input(&mut bus, TuiInput::Char('V')).await?;
     assert_eq!(app.state.contacts[0].verification_state, "verified");
     assert!(bus.requests.iter().any(|request| request.method == "contact.verify"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn contacts_panel_adds_contact_with_commitments_and_switches_account() -> Result<(), TuiError>
+{
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("alice_account");
+    app.refresh_all(&mut bus).await?;
+    app.state.selected_panel = Panel::Contacts;
+
+    for value in "add friend_tui_2 alice_commitment bob_commitment".chars() {
+        app.handle_input(&mut bus, TuiInput::Char(value)).await?;
+    }
+    app.handle_input(&mut bus, TuiInput::Enter).await?;
+    let add =
+        bus.requests.iter().find(|request| request.method == "contact.add").ok_or_else(|| {
+            TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing add".to_owned()))
+        })?;
+    assert_eq!(add.account_id.as_deref(), Some("alice_account"));
+    assert_eq!(add.body["requester_id"], "alice_commitment");
+    assert_eq!(add.body["target_id"], "bob_commitment");
+    assert_eq!(app.state.status_message.as_deref(), Some("contact added: friend_tui_2"));
+
+    for value in "switch bob_account".chars() {
+        app.handle_input(&mut bus, TuiInput::Char(value)).await?;
+    }
+    app.handle_input(&mut bus, TuiInput::Enter).await?;
+    let switch =
+        bus.requests.iter().find(|request| request.method == "account.switch").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing switch".to_owned())),
+        )?;
+    assert_eq!(switch.account_id.as_deref(), Some("bob_account"));
+    assert_eq!(app.state.account_id, "bob_account");
     Ok(())
 }
 
@@ -196,8 +348,11 @@ async fn contact_panel_loads_safety_number_and_marks_verified() -> Result<(), Tu
 async fn message_panel_surfaces_receipts_and_delete_actions() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_local_device_id("alice_device_tui");
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
+    app.state.conversations[0].recipient_device_id = Some("bob_device_tui".to_owned());
+    app.state.conversations[0].target_delivery_id = Some("target_bob_tui".to_owned());
 
     app.handle_input(&mut bus, TuiInput::Char('l')).await?;
     app.handle_input(&mut bus, TuiInput::Char('r')).await?;
@@ -205,6 +360,23 @@ async fn message_panel_surfaces_receipts_and_delete_actions() -> Result<(), TuiE
 
     assert!(bus.requests.iter().any(|request| request.method == "message.receipt.delivered"));
     assert!(bus.requests.iter().any(|request| request.method == "message.receipt.read"));
+    let delivered = bus
+        .requests
+        .iter()
+        .find(|request| request.method == "message.receipt.delivered")
+        .ok_or_else(|| {
+            TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing delivered".to_owned()))
+        })?;
+    assert_eq!(delivered.body["receiver_device_id"], "alice_device_tui");
+    assert_eq!(delivered.body["recipient_device_id"], "bob_device_tui");
+    assert_eq!(delivered.body["target_delivery_id"], "target_bob_tui");
+    let read =
+        bus.requests.iter().find(|request| request.method == "message.receipt.read").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing read".to_owned())),
+        )?;
+    assert_eq!(read.body["reader_id"], "alice_device_tui");
+    assert_eq!(read.body["recipient_device_id"], "bob_device_tui");
+    assert_eq!(read.body["target_delivery_id"], "target_bob_tui");
     assert!(bus.requests.iter().any(|request| request.method == "message.delete"));
     assert_eq!(app.state.messages[0].status, "deleted");
     Ok(())
@@ -226,6 +398,68 @@ async fn group_panel_surfaces_governance_actions() -> Result<(), TuiError> {
     assert!(bus.requests.iter().any(|request| request.method == "conversation.mute"));
     assert_eq!(app.state.groups[0].members, vec!["alice"]);
     assert_eq!(app.state.groups[0].disappearing_ttl_secs, Some(30));
+    Ok(())
+}
+
+#[tokio::test]
+async fn contacts_panel_surfaces_device_restore_and_revoke() -> Result<(), TuiError> {
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("alice_account");
+
+    app.refresh_devices(&mut bus).await?;
+    app.activate_device(&mut bus, "device_tui_alice_b", "target_tui_alice_b", [0x22; 32], Some(2))
+        .await?;
+    app.revoke_device(&mut bus, "device_tui_alice_b").await?;
+
+    assert!(app.state.devices.iter().any(|device| {
+        device.device_id == "device_tui_alice_b" && device.is_local && device.device_epoch == 2
+    }));
+    let activate =
+        bus.requests.iter().find(|request| request.method == "device.activate").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing activate".to_owned())),
+        )?;
+    assert_eq!(activate.sdk_api, "device");
+    assert_eq!(activate.body["device_id"], "device_tui_alice_b");
+    assert_eq!(activate.body["target_delivery_id"], "target_tui_alice_b");
+    assert_eq!(activate.body["device_epoch"], 2);
+    let revoke =
+        bus.requests.iter().find(|request| request.method == "device.revoke").ok_or_else(|| {
+            TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing revoke".to_owned()))
+        })?;
+    assert_eq!(revoke.body["device_id"], "device_tui_alice_b");
+    assert!(bus.requests.iter().any(|request| request.method == "device.list"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn contacts_panel_surfaces_own_device_sync_actions() -> Result<(), TuiError> {
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("alice_account");
+
+    let envelope = serde_json::json!({
+        "schema": "ramflux.sdk.own_device_sync.v1",
+        "snapshot_id": "snapshot_tui"
+    });
+    app.export_device_sync(
+        &mut bus,
+        "device_tui_alice_b",
+        "http://127.0.0.1:18084",
+        Some("relay-key".to_owned()),
+    )
+    .await?;
+    app.import_device_sync(&mut bus, envelope.clone(), Some("relay-key".to_owned())).await?;
+
+    let export =
+        bus.requests.iter().find(|request| request.method == "device.sync.export").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing sync export".to_owned())),
+        )?;
+    assert_eq!(export.body["target_device_id"], "device_tui_alice_b");
+    assert_eq!(export.body["relay_endpoint"], "http://127.0.0.1:18084");
+    let import =
+        bus.requests.iter().find(|request| request.method == "device.sync.import").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing sync import".to_owned())),
+        )?;
+    assert_eq!(import.body["envelope"], envelope);
     Ok(())
 }
 
@@ -403,8 +637,111 @@ async fn message_submit_uses_selected_conversation_recipient_for_bootstrap() -> 
             || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing submit".to_owned())),
         )?;
     assert_eq!(submit.body["conversation_id"], "conv_bootstrap");
+    assert_eq!(submit.body["source_principal_id"], "principal_tui_alice");
+    assert_eq!(submit.body["sender_id"], "device_tui_alice");
     assert_eq!(submit.body["recipient_device_id"], "bob_device_tui");
     assert_eq!(submit.body["target_delivery_id"], "target_tui_bob");
+    Ok(())
+}
+
+#[tokio::test]
+async fn message_panel_submits_queued_attachment_over_bus() -> Result<(), TuiError> {
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("alice_account");
+    app.refresh_all(&mut bus).await?;
+    app.state.selected_panel = Panel::Messages;
+    app.queue_attachment_bytes_for_relay(
+        "object_tui_attach_send",
+        b"secret attachment bytes",
+        "http://relay.test",
+        Some("relay_key_tui".to_owned()),
+    );
+    for value in "body with attachment".chars() {
+        app.handle_input(&mut bus, TuiInput::Char(value)).await?;
+    }
+    app.handle_input(&mut bus, TuiInput::Enter).await?;
+
+    let submit =
+        bus.requests.iter().rfind(|request| request.method == "message.submit").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing submit".to_owned())),
+        )?;
+    let attachments = submit.body["attachments"].as_array().ok_or_else(|| {
+        TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing attachments".to_owned()))
+    })?;
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0]["object_id"], "object_tui_attach_send");
+    assert_eq!(attachments[0]["relay_endpoint"], "http://relay.test");
+    assert_eq!(attachments[0]["relay_service_key_base64"], "relay_key_tui");
+    assert_eq!(
+        attachments[0]["plaintext_base64"].as_str(),
+        Some(ramflux_protocol::encode_base64url(b"secret attachment bytes").as_str())
+    );
+    assert_eq!(app.state.pending_attachments.len(), 0);
+    assert!(app.state.messages.iter().any(|message| {
+        message.attachments.iter().any(|item| item.object_id == "object_tui_attach_send")
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn message_receive_auto_fetches_and_renders_attachment() -> Result<(), TuiError> {
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("bob_account");
+    app.receive_messages_with_attachments(&mut bus).await?;
+
+    let receive =
+        bus.requests.iter().find(|request| request.method == "message.receive").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing receive".to_owned())),
+        )?;
+    assert_eq!(receive.body["auto_fetch_attachments"], true);
+    let message =
+        app.state.messages.iter().find(|message| message.id == "env_tui_attach_1").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing message".to_owned())),
+        )?;
+    assert_eq!(message.body, "attachment received");
+    assert_eq!(message.attachments[0].object_id, "object_tui_attach_1");
+    assert_eq!(message.attachments[0].status, "decrypted");
+
+    app.state.selected_panel = Panel::Messages;
+    let mut terminal = Terminal::new(TestBackend::new(120, 28))
+        .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
+    terminal
+        .draw(|frame| app.render(frame))
+        .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
+    let buffer = buffer_text(&terminal);
+    assert!(buffer.contains("object_tui_attach_1:decrypted"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn object_panel_renders_transfer_progress_and_resumes() -> Result<(), TuiError> {
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("alice_account");
+    app.refresh_object_status(&mut bus, "object_tui_status", Some("upload")).await?;
+    if let Some(row) = app.state.object_transfers.first_mut() {
+        row.relay_endpoint = Some("http://relay.test".to_owned());
+        row.relay_service_key_base64 = Some("relay_key_tui".to_owned());
+    }
+    app.state.selected_panel = Panel::Objects;
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 28))
+        .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
+    terminal
+        .draw(|frame| app.render(frame))
+        .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
+    let buffer = buffer_text(&terminal);
+    assert!(buffer.contains("object_tui_status"));
+    assert!(buffer.contains("in_progress"));
+    assert!(buffer.contains("512/1024 50%"));
+
+    app.handle_input(&mut bus, TuiInput::Char('r')).await?;
+    assert!(bus.requests.iter().any(|request| {
+        request.method == "object.transfer.resume"
+            && request.body["object_id"] == "object_tui_status"
+            && request.body["relay_endpoint"] == "http://relay.test"
+    }));
+    assert_eq!(app.state.object_transfers[0].state, "complete");
+    assert_eq!(app.state.object_transfers[0].percent, 100);
     Ok(())
 }
 
@@ -488,10 +825,7 @@ async fn remote_app_approval_is_visible_and_not_locally_approved() -> Result<(),
     assert!(buffer.contains("App"));
 
     app.handle_input(&mut bus, TuiInput::Char('a')).await?;
-    assert_eq!(
-        app.state.status_message.as_deref(),
-        Some("This approval requires App-side signing (remote_app)")
-    );
+    assert_eq!(app.state.status_message.as_deref(), Some("该审批需 App 端签名授权(remote_app)"));
     assert!(!bus.requests.iter().any(|request| request.method == "grant.approve"));
     Ok(())
 }

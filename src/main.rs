@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Span Brain
+
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ramflux_tui::{SdkLocalBus, TuiApp, TuiError, key_to_input};
+use ramflux_cli_pro::{SdkLocalBus, TuiApp, TuiError, key_to_input};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io::{self, Stdout};
@@ -20,7 +21,7 @@ const DEFAULT_SOCKET: &str = "/tmp/ramflux/rfd.sock";
 struct Cli {
     #[arg(long, default_value = DEFAULT_SOCKET)]
     socket: PathBuf,
-    #[arg(long, default_value = ramflux_tui::DEFAULT_ACCOUNT_ID)]
+    #[arg(long, default_value = ramflux_cli_pro::DEFAULT_ACCOUNT_ID)]
     account: String,
 }
 
