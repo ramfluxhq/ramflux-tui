@@ -121,7 +121,12 @@ impl TuiApp {
                 self.submit_contact_command(bus).await?;
             }
             TuiInput::Enter => self.submit_current_message(bus).await?,
-            TuiInput::EnterCompose if self.state.selected_panel == Panel::Messages => {
+            TuiInput::EnterCompose
+                if matches!(
+                    self.state.selected_panel,
+                    Panel::Messages | Panel::Objects | Panel::Contacts
+                ) =>
+            {
                 self.state.input_mode = InputMode::Compose;
             }
             TuiInput::EnterCompose | TuiInput::ExitCompose => {}
@@ -161,15 +166,6 @@ impl TuiApp {
             TuiInput::Char('e') if self.state.selected_panel == Panel::Groups => {
                 self.set_selected_group_disappearing(bus, 3_600).await?;
             }
-            TuiInput::Char(value) if self.state.selected_panel == Panel::Messages => {
-                self.state.input.push(value);
-            }
-            TuiInput::Char(value) if self.state.selected_panel == Panel::Objects => {
-                self.state.input.push(value);
-            }
-            TuiInput::Char(value) if self.state.selected_panel == Panel::Contacts => {
-                self.state.input.push(value);
-            }
             TuiInput::Char(_value) => {}
             TuiInput::Backspace => {
                 self.state.input.pop();
@@ -192,7 +188,11 @@ impl TuiApp {
             }
             TuiInput::ExitCompose => self.state.input_mode = InputMode::Normal,
             TuiInput::Enter => {
-                self.submit_current_message(bus).await?;
+                match self.state.selected_panel {
+                    Panel::Objects => self.submit_object_command(bus).await?,
+                    Panel::Contacts => self.submit_contact_command(bus).await?,
+                    _ => self.submit_current_message(bus).await?,
+                }
                 self.state.input_mode = InputMode::Normal;
             }
             TuiInput::Quit => self.state.input.push('q'),
@@ -375,7 +375,7 @@ impl TuiApp {
             Paragraph::new(lines)
                 .block(
                     Block::default()
-                        .title("Objects  put/get/status/resume commands  s=status r=resume")
+                        .title("Objects  i=type put/get/status/resume command  s=status r=resume")
                         .borders(Borders::ALL),
                 )
                 .wrap(Wrap { trim: false }),
@@ -458,7 +458,9 @@ impl TuiApp {
         frame.render_widget(
             List::new(items).block(
                 Block::default()
-                    .title("Contacts/Devices  add/switch/accept + Enter  S=safety V=verify")
+                    .title(
+                        "Contacts/Devices  i=type add/switch/accept then Enter  S=safety V=verify",
+                    )
                     .borders(Borders::ALL),
             ),
             area,
