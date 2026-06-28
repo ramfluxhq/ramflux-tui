@@ -997,6 +997,120 @@ async fn dispatch_input_surfaces_error_without_quitting() {
     );
 }
 
+#[tokio::test]
+async fn empty_message_submit_surfaces_status_instead_of_silent_noop() -> Result<(), TuiError> {
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("alice_account");
+    app.state.selected_panel = Panel::Messages;
+    assert!(app.state.input.is_empty());
+
+    // Empty input must give visible feedback rather than silently returning Ok.
+    app.dispatch_input(&mut bus, TuiInput::Enter).await;
+
+    assert_eq!(app.state.status_message.as_deref(), Some("nothing to send"));
+    assert!(!bus.requests.iter().any(|request| request.method == "message.submit"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn decide_approval_with_no_selection_surfaces_status() -> Result<(), TuiError> {
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("alice_account");
+    app.state.selected_panel = Panel::Approvals;
+    assert!(app.state.approvals.is_empty());
+
+    app.handle_input(&mut bus, TuiInput::Char('a')).await?;
+
+    assert_eq!(app.state.status_message.as_deref(), Some("no approval selected"));
+    assert!(!bus.requests.iter().any(|request| request.method == "grant.approve"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn verify_refuses_blind_then_allows_after_safety_number() -> Result<(), TuiError> {
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("alice_account");
+    app.refresh_all(&mut bus).await?;
+    app.state.selected_panel = Panel::Contacts;
+    assert!(app.state.contacts[0].safety_number.is_empty());
+
+    // Blind verify is refused while no safety number has been fetched.
+    app.verify_selected_contact(&mut bus).await?;
+    assert!(!bus.requests.iter().any(|request| request.method == "contact.verify"));
+    assert_eq!(app.state.contacts[0].verification_state, "unverified");
+    assert!(
+        app.state.status_message.as_deref().is_some_and(|status| status.contains("press S")),
+        "refusal hint missing: {:?}",
+        app.state.status_message
+    );
+
+    // Once the safety number is loaded, verify is allowed to proceed.
+    app.refresh_selected_contact_safety(&mut bus).await?;
+    assert!(!app.state.contacts[0].safety_number.is_empty());
+    app.verify_selected_contact(&mut bus).await?;
+    assert!(bus.requests.iter().any(|request| request.method == "contact.verify"));
+    assert_eq!(app.state.contacts[0].verification_state, "verified");
+    assert_eq!(app.state.status_message.as_deref(), Some("contact verified"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn decrypted_message_replaces_delivery_placeholder() -> Result<(), TuiError> {
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("bob_account");
+    app.state.conversations.push(ConversationRow {
+        id: DEFAULT_CONVERSATION_ID.to_owned(),
+        title: "Default DM".to_owned(),
+        last_message: String::new(),
+        unread: 0,
+        status: "synced".to_owned(),
+        recipient_device_id: None,
+        target_delivery_id: None,
+    });
+
+    // A live delivery pushes a placeholder keyed by envelope_id.
+    let event = ramflux_sdk::LocalBusFrame {
+        bus_protocol: "ramflux.local_bus.v1".to_owned(),
+        frame_id: "frame_evt_placeholder".to_owned(),
+        kind: ramflux_sdk::LocalBusFrameKind::Event,
+        request_id: "req_placeholder".to_owned(),
+        account_id: Some("bob_account".to_owned()),
+        sdk_api: "gateway".to_owned(),
+        method: "gateway.deliver".to_owned(),
+        body: serde_json::json!({
+            "entries": [{
+                "inbox_seq": 1,
+                "envelope": {
+                    "envelope_id": "env_tui_placeholder_1",
+                    "source_principal_id": "alice"
+                }
+            }]
+        }),
+        trace_id: None,
+        ok: None,
+        error: None,
+    };
+    app.handle_bus_event(&event)?;
+    assert_eq!(app.state.conversations[0].unread, 1);
+    assert!(app.state.messages.iter().any(|message| message.body == "[new encrypted message]"));
+
+    // The decrypt fetch returns a row keyed by a different message_id; the stale
+    // placeholder must be dropped rather than left lingering beside the real copy.
+    app.receive_messages_with_attachments(&mut bus).await?;
+
+    assert!(
+        !app.state.messages.iter().any(|message| message.body == "[new encrypted message]"),
+        "placeholder lingered after decrypt: {:?}",
+        app.state.messages
+    );
+    assert_eq!(app.state.messages.len(), 1);
+    assert_eq!(app.state.messages[0].id, "env_tui_attach_1");
+    assert_eq!(app.state.messages[0].body, "attachment received");
+    // The placeholder's unread bump is undone so the decrypted copy is not double-counted.
+    assert_eq!(app.state.conversations[0].unread, 1);
+    Ok(())
+}
+
 fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
     terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect()
 }

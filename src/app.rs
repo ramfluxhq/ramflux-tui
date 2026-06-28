@@ -21,6 +21,12 @@ use crate::{
 const DEFAULT_OBJECT_CHUNK_SIZE: usize = 64 * 1024;
 const RELAY_URL_ENV: &str = "RAMFLUX_TUI_RELAY_URL";
 const RELAY_KEY_ENV: &str = "RAMFLUX_TUI_RELAY_SERVICE_KEY_BASE64";
+/// Body shown for a freshly-delivered envelope before the plaintext is decrypted.
+///
+/// Keyed by `envelope_id` in [`TuiApp::handle_bus_event`]; the decrypt path keys by
+/// `message_id`, so these stub rows are dropped once decrypted messages arrive to
+/// avoid a stale placeholder lingering next to the real copy.
+const PLACEHOLDER_MESSAGE_BODY: &str = "[new encrypted message]";
 
 /// TUI application controller.
 #[derive(Clone, Debug, Default)]
@@ -226,7 +232,7 @@ impl TuiApp {
                 self.push_message(MessageRow {
                     id: envelope_id.to_owned(),
                     sender: sender.to_owned(),
-                    body: "[new encrypted message]".to_owned(),
+                    body: PLACEHOLDER_MESSAGE_BODY.to_owned(),
                     status: "delivered".to_owned(),
                     attachments: Vec::new(),
                     receipts: Vec::new(),
@@ -614,7 +620,15 @@ impl TuiApp {
                 }),
             )
             .await?;
-        for message in parse_decrypted_messages(&response) {
+        let decrypted = parse_decrypted_messages(&response);
+        if !decrypted.is_empty() {
+            // Decrypted rows are keyed by `message_id`; the live-delivery placeholders are
+            // keyed by `envelope_id`, so they would never be matched by `upsert_message`.
+            // Drop the stale stubs here so the decrypted copy replaces them instead of
+            // sitting beside a lingering "[new encrypted message]".
+            self.drop_placeholder_messages();
+        }
+        for message in decrypted {
             self.upsert_message(message);
         }
         Ok(())
@@ -682,6 +696,7 @@ impl TuiApp {
         method: &str,
     ) -> Result<(), TuiError> {
         let Some(approval) = self.state.approvals.get(self.state.selected_approval).cloned() else {
+            self.state.status_message = Some("no approval selected".to_owned());
             return Ok(());
         };
         if method == "grant.approve" {
@@ -707,6 +722,7 @@ impl TuiApp {
         bus: &mut B,
     ) -> Result<(), TuiError> {
         if self.state.selected_panel != Panel::Messages || self.state.input.is_empty() {
+            self.state.status_message = Some("nothing to send".to_owned());
             return Ok(());
         }
         let body = std::mem::take(&mut self.state.input);
@@ -1063,6 +1079,7 @@ impl TuiApp {
         let Some(row) =
             self.state.object_transfers.get(self.state.selected_object_transfer).cloned()
         else {
+            self.state.status_message = Some("no object transfer selected".to_owned());
             return Ok(());
         };
         self.refresh_object_status(bus, &row.object_id, Some(&row.direction)).await
@@ -1079,6 +1096,7 @@ impl TuiApp {
         let Some(row) =
             self.state.object_transfers.get(self.state.selected_object_transfer).cloned()
         else {
+            self.state.status_message = Some("no object transfer selected".to_owned());
             return Ok(());
         };
         self.resume_transfer_with_relay(
@@ -1149,6 +1167,7 @@ impl TuiApp {
         bus: &mut B,
     ) -> Result<(), TuiError> {
         let Some(contact) = self.state.contacts.get(self.state.selected_contact).cloned() else {
+            self.state.status_message = Some("no contact selected".to_owned());
             return Ok(());
         };
         let response = bus
@@ -1172,8 +1191,16 @@ impl TuiApp {
         bus: &mut B,
     ) -> Result<(), TuiError> {
         let Some(contact) = self.state.contacts.get(self.state.selected_contact).cloned() else {
+            self.state.status_message = Some("no contact selected".to_owned());
             return Ok(());
         };
+        if contact.safety_number.is_empty() {
+            self.state.status_message = Some(
+                "refusing blind verify: press S to load the safety number, then compare all 60 digits out-of-band before verifying"
+                    .to_owned(),
+            );
+            return Ok(());
+        }
         let response = bus
             .request(
                 Some(self.state.account_id.clone()),
@@ -1183,6 +1210,7 @@ impl TuiApp {
             )
             .await?;
         self.apply_contact_safety_response(&response);
+        self.state.status_message = Some("contact verified".to_owned());
         Ok(())
     }
 
@@ -1221,11 +1249,11 @@ impl TuiApp {
                 self.switch_account(bus, account_id).await?;
             }
             Some(other) => {
-                return Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(format!(
-                    "unknown contacts command: {other}"
-                ))));
+                self.state.status_message = Some(format!("unknown command: {other}"));
             }
-            None => {}
+            None => {
+                self.state.status_message = Some("no command entered".to_owned());
+            }
         }
         Ok(())
     }
@@ -1324,6 +1352,7 @@ impl TuiApp {
         bus: &mut B,
     ) -> Result<(), TuiError> {
         let Some(message) = self.state.messages.get(self.state.selected_message).cloned() else {
+            self.state.status_message = Some("no message selected".to_owned());
             return Ok(());
         };
         let conversation_id = self
@@ -1354,6 +1383,7 @@ impl TuiApp {
         bus: &mut B,
     ) -> Result<(), TuiError> {
         let Some(message) = self.state.messages.get(self.state.selected_message).cloned() else {
+            self.state.status_message = Some("no message selected".to_owned());
             return Ok(());
         };
         let conversation = self.selected_conversation();
@@ -1393,6 +1423,7 @@ impl TuiApp {
         bus: &mut B,
     ) -> Result<(), TuiError> {
         let Some(message) = self.state.messages.get(self.state.selected_message).cloned() else {
+            self.state.status_message = Some("no message selected".to_owned());
             return Ok(());
         };
         let conversation = self.selected_conversation();
@@ -1681,6 +1712,7 @@ impl TuiApp {
         ttl_secs: i64,
     ) -> Result<(), TuiError> {
         let Some(group) = self.state.groups.get(self.state.selected_group).cloned() else {
+            self.state.status_message = Some("no group selected".to_owned());
             return Ok(());
         };
         let response = bus
@@ -1731,6 +1763,7 @@ impl TuiApp {
         unmute: bool,
     ) -> Result<(), TuiError> {
         let Some(group) = self.state.groups.get(self.state.selected_group).cloned() else {
+            self.state.status_message = Some("no group selected".to_owned());
             return Ok(());
         };
         let response = bus
@@ -1821,6 +1854,23 @@ impl TuiApp {
             *existing = message;
         } else {
             self.push_message(message);
+        }
+    }
+
+    /// Removes live-delivery placeholder rows once their decrypted copies are available.
+    fn drop_placeholder_messages(&mut self) {
+        let before = self.state.messages.len();
+        self.state.messages.retain(|row| row.body != PLACEHOLDER_MESSAGE_BODY);
+        let removed = before - self.state.messages.len();
+        if removed == 0 {
+            return;
+        }
+        if let Some(conversation) = self.state.conversations.first_mut() {
+            // The placeholder bumped `unread` when it was pushed; undo that bump so the
+            // decrypted copy does not double-count.
+            conversation.unread = conversation.unread.saturating_sub(removed);
+            conversation.last_message =
+                self.state.messages.last().map_or_else(String::new, |row| row.body.clone());
         }
     }
 
