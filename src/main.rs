@@ -57,7 +57,7 @@ async fn run_terminal_loop(
             && key.kind == KeyEventKind::Press
             && let Some(input) = key_to_input(key.code)
         {
-            app.handle_input(bus, input).await?;
+            app.dispatch_input(bus, input).await;
         }
     }
     Ok(())
