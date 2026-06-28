@@ -10,8 +10,8 @@ use std::fmt::Write as _;
 
 use crate::a2ui_render::{approval_a2ui_suffix, dispatch_a2ui_approval_action};
 use crate::parsing::{
-    parse_approval_row, parse_approvals, parse_contacts, parse_decrypted_messages, parse_devices,
-    parse_groups, parse_messages, parse_transfer,
+    parse_approval_row, parse_approvals, parse_contacts, parse_conversations,
+    parse_decrypted_messages, parse_devices, parse_groups, parse_messages, parse_transfer,
 };
 use crate::{
     ConversationRow, DEFAULT_CONVERSATION_ID, DEFAULT_TARGET_DELIVERY_ID, InputMode, MessageRow,
@@ -56,6 +56,7 @@ impl TuiApp {
     /// Returns an error when any local bus projection request fails.
     pub async fn refresh_all<B: TuiBus + Send>(&mut self, bus: &mut B) -> Result<(), TuiError> {
         self.open_subscription(bus).await?;
+        self.refresh_conversations(bus).await?;
         self.refresh_messages(bus).await?;
         self.receive_messages_with_attachments(bus).await?;
         self.refresh_contacts(bus).await?;
@@ -528,6 +529,37 @@ impl TuiApp {
         } else {
             "a=approve"
         }
+    }
+
+    /// Loads the real conversation list from storage via the local bus.
+    ///
+    /// When the account has real conversations they replace the list entirely
+    /// (the synthetic "Default DM" row is bypassed). When none exist the list
+    /// is left untouched so [`Self::ensure_default_conversation`] can keep a
+    /// usable empty-state row.
+    ///
+    /// # Errors
+    /// Returns an error when the local bus conversation list request fails.
+    async fn refresh_conversations<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+    ) -> Result<(), TuiError> {
+        let response = bus
+            .request(
+                Some(self.state.account_id.clone()),
+                "message",
+                "conversation.list",
+                serde_json::json!({}),
+            )
+            .await?;
+        let conversations = parse_conversations(&response);
+        if !conversations.is_empty() {
+            self.state.conversations = conversations;
+            if self.state.selected_conversation >= self.state.conversations.len() {
+                self.state.selected_conversation = 0;
+            }
+        }
+        Ok(())
     }
 
     async fn refresh_messages<B: TuiBus + Send>(&mut self, bus: &mut B) -> Result<(), TuiError> {

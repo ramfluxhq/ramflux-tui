@@ -3,8 +3,8 @@
 
 use crate::a2ui_render::render_a2ui_for_approval;
 use crate::{
-    ApprovalRow, AttachmentRow, ContactRow, DeviceRow, GroupRow, MessageReceiptRow, MessageRow,
-    ObjectTransferRow,
+    ApprovalRow, AttachmentRow, ContactRow, ConversationRow, DeviceRow, GroupRow,
+    MessageReceiptRow, MessageRow, ObjectTransferRow,
 };
 
 pub(crate) fn parse_messages(response: &serde_json::Value) -> Vec<MessageRow> {
@@ -109,6 +109,36 @@ fn parse_attachment_rows(
                 .get("plaintext_base64")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
+        })
+        .collect()
+}
+
+/// Parses the real conversations projection returned by `conversation.list`.
+///
+/// The storage schema has no peer/display-name column, so the conversation id
+/// doubles as the title; it also has no reader-free unread count, so `unread`
+/// stays 0 here and is only advanced live as deliveries arrive.
+pub(crate) fn parse_conversations(response: &serde_json::Value) -> Vec<ConversationRow> {
+    response
+        .get("conversations")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|conversation| {
+            let id = string_field(conversation, "conversation_id", "conversation");
+            let is_archived = conversation
+                .get("is_archived")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            ConversationRow {
+                title: id.clone(),
+                id,
+                last_message: String::new(),
+                unread: 0,
+                status: if is_archived { "archived".to_owned() } else { "synced".to_owned() },
+                recipient_device_id: None,
+                target_delivery_id: None,
+            }
         })
         .collect()
 }
