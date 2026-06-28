@@ -16,6 +16,10 @@ use crate::*;
 struct MockBus {
     requests: Vec<MockRequest>,
     events: VecDeque<ramflux_sdk::LocalBusFrame>,
+    /// Response returned for `conversation.list`. Defaults to JSON `null`,
+    /// which `parse_conversations` reads as "no real conversations" so the
+    /// synthetic Default DM fallback still applies.
+    conversation_list: serde_json::Value,
 }
 
 #[derive(Clone, Debug)]
@@ -170,6 +174,7 @@ impl TuiBus for MockBus {
                 "conversation_id": "group_tui_1",
                 "mute_until": body.get("mute_until").cloned().unwrap_or(serde_json::Value::Null)
             }),
+            "conversation.list" => self.conversation_list.clone(),
             "subscription.open" => serde_json::json!({"subscribed": true}),
             "account.status" => serde_json::json!({
                 "local_account_id": "alice_account",
@@ -290,6 +295,59 @@ async fn renders_conversations_messages_contacts_and_groups() -> Result<(), TuiE
     assert!(buffer.contains("attended_local"));
     assert!(buffer.contains("approval_card"));
     assert!(buffer.contains("a2ui_hash="));
+    Ok(())
+}
+
+#[tokio::test]
+async fn conversations_panel_uses_real_projection_over_synthetic_default() -> Result<(), TuiError> {
+    let mut bus = MockBus {
+        conversation_list: serde_json::json!({
+            "conversations": [
+                {
+                    "conversation_id": "conv_real_1",
+                    "message_count": 3,
+                    "last_message_id": "msg_real_1c",
+                    "last_activity_at": 1_900_000_100,
+                    "is_archived": false,
+                    "pin_order": null
+                },
+                {
+                    "conversation_id": "conv_real_2",
+                    "message_count": 0,
+                    "last_message_id": null,
+                    "last_activity_at": null,
+                    "is_archived": true,
+                    "pin_order": null
+                }
+            ]
+        }),
+        ..MockBus::default()
+    };
+    let mut app = TuiApp::new("alice_account");
+    app.refresh_all(&mut bus).await?;
+
+    assert_eq!(app.state.conversations.len(), 2);
+    assert_eq!(app.state.conversations[0].id, "conv_real_1");
+    assert_eq!(app.state.conversations[1].id, "conv_real_2");
+    // The archived flag from storage flows through to the row status.
+    assert_eq!(app.state.conversations[1].status, "archived");
+    assert!(app.state.conversations.iter().all(|row| row.title != "Default DM"));
+
+    // refresh_messages must follow the real selected conversation.
+    let read =
+        bus.requests.iter().find(|request| request.method == "message.read").ok_or_else(|| {
+            TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing read".to_owned()))
+        })?;
+    assert_eq!(read.body["conversation_id"], "conv_real_1");
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 28))
+        .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
+    terminal
+        .draw(|frame| app.render(frame))
+        .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
+    let buffer = buffer_text(&terminal);
+    assert!(buffer.contains("conv_real_1"));
+    assert!(!buffer.contains("Default DM"));
     Ok(())
 }
 
