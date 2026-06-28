@@ -318,10 +318,12 @@ async fn contacts_panel_adds_contact_with_commitments_and_switches_account() -> 
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Contacts;
 
+    app.handle_input(&mut bus, TuiInput::EnterCompose).await?;
     for value in "add friend_tui_2 alice_commitment bob_commitment".chars() {
         app.handle_input(&mut bus, TuiInput::Char(value)).await?;
     }
     app.handle_input(&mut bus, TuiInput::Enter).await?;
+    assert_eq!(app.state.input_mode, InputMode::Normal);
     let add =
         bus.requests.iter().find(|request| request.method == "contact.add").ok_or_else(|| {
             TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing add".to_owned()))
@@ -331,6 +333,7 @@ async fn contacts_panel_adds_contact_with_commitments_and_switches_account() -> 
     assert_eq!(add.body["target_id"], "bob_commitment");
     assert_eq!(app.state.status_message.as_deref(), Some("contact added: friend_tui_2"));
 
+    app.handle_input(&mut bus, TuiInput::EnterCompose).await?;
     for value in "switch bob_account".chars() {
         app.handle_input(&mut bus, TuiInput::Char(value)).await?;
     }
@@ -469,6 +472,7 @@ async fn enter_in_message_panel_submits_plaintext_over_bus() -> Result<(), TuiEr
     let mut app = TuiApp::new("alice_account");
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
+    app.handle_input(&mut bus, TuiInput::EnterCompose).await?;
     for value in "typed via tui".chars() {
         app.handle_input(&mut bus, TuiInput::Char(value)).await?;
     }
@@ -551,6 +555,48 @@ async fn compose_mode_keeps_keyboard_mapped_q_and_i_as_plaintext() -> Result<(),
 }
 
 #[tokio::test]
+async fn compose_mode_on_objects_preserves_command_letters() -> Result<(), TuiError> {
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("alice_account");
+    app.refresh_all(&mut bus).await?;
+    app.state.selected_panel = Panel::Objects;
+
+    // Enter Compose so command letters become literal text. In Normal mode 'r'
+    // and 's' are the resume/status shortcuts and would otherwise be eaten.
+    app.handle_input(&mut bus, TuiInput::EnterCompose).await?;
+    assert_eq!(app.state.input_mode, InputMode::Compose);
+    for value in "put ./foo.rs id".chars() {
+        app.handle_input(&mut bus, TuiInput::Char(value)).await?;
+    }
+    assert_eq!(app.state.input, "put ./foo.rs id");
+    Ok(())
+}
+
+#[tokio::test]
+async fn compose_enter_dispatches_object_command_and_resets_mode() -> Result<(), TuiError> {
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("alice_account");
+    app.refresh_all(&mut bus).await?;
+    app.state.selected_panel = Panel::Objects;
+
+    app.handle_input(&mut bus, TuiInput::EnterCompose).await?;
+    // "status" + an object id carrying 'r'/'s' proves the letters survive to dispatch.
+    for value in "status object_resource".chars() {
+        app.handle_input(&mut bus, TuiInput::Char(value)).await?;
+    }
+    app.handle_input(&mut bus, TuiInput::Enter).await?;
+
+    assert_eq!(app.state.input_mode, InputMode::Normal);
+    assert!(app.state.input.is_empty());
+    assert!(bus.requests.iter().any(|request| {
+        request.method == "object.transfer.status" && request.body["object_id"] == "object_resource"
+    }));
+    // The message submit path must not fire for the Objects panel.
+    assert!(!bus.requests.iter().any(|request| request.method == "message.submit"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn input_title_reflects_compose_mode() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
@@ -627,6 +673,7 @@ async fn message_submit_uses_selected_conversation_recipient_for_bootstrap() -> 
         target_delivery_id: Some("target_tui_bob".to_owned()),
     });
     app.state.selected_panel = Panel::Messages;
+    app.handle_input(&mut bus, TuiInput::EnterCompose).await?;
     for value in "hello bob".chars() {
         app.handle_input(&mut bus, TuiInput::Char(value)).await?;
     }
@@ -656,6 +703,7 @@ async fn message_panel_submits_queued_attachment_over_bus() -> Result<(), TuiErr
         "http://relay.test",
         Some("relay_key_tui".to_owned()),
     );
+    app.handle_input(&mut bus, TuiInput::EnterCompose).await?;
     for value in "body with attachment".chars() {
         app.handle_input(&mut bus, TuiInput::Char(value)).await?;
     }
