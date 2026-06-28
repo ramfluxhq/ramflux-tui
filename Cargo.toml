@@ -3,9 +3,9 @@ name = "ramflux-cli-pro"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.0"
-license = "UNLICENSED"
+license = "AGPL-3.0-or-later"
 publish = false
-repository = "ssh://forgejo/ramflux/ramflux-cli-pro"
+repository = "https://github.com/ramfluxhq/ramflux-tui"
 
 [[bin]]
 name = "rf-tui"
@@ -13,9 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 # private UI shell over the open local bus client
-ramflux-protocol = { path = "../ramflux-protocol" }
-ramflux-sdk = { path = "../ramflux-sdk" }
-ramflux-sync = { path = "../ramflux-sync" }
+ramflux-protocol = { git = "https://github.com/ramfluxhq/ramflux.git", package = "ramflux-protocol" }
+ramflux-sdk = { git = "https://github.com/ramfluxhq/ramflux.git", package = "ramflux-sdk" }
+ramflux-sync = { git = "https://github.com/ramfluxhq/ramflux.git", package = "ramflux-sync" }
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"

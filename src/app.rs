@@ -87,6 +87,17 @@ impl TuiApp {
         Ok(())
     }
 
+    /// Handles one UI input event, surfacing any error into the status line.
+    ///
+    /// Unlike [`Self::handle_input`], this never returns the error to the caller:
+    /// the event loop must keep running, so a failed input only sets
+    /// `status_message` and leaves `should_quit` untouched.
+    pub async fn dispatch_input<B: TuiBus + Send>(&mut self, bus: &mut B, input: TuiInput) {
+        if let Err(error) = self.handle_input(bus, input).await {
+            self.state.status_message = Some(format!("error: {error}"));
+        }
+    }
+
     /// Handles one UI input event.
     ///
     /// # Errors
@@ -421,8 +432,13 @@ impl TuiApp {
             .map(|(index, contact)| {
                 let marker = if index == self.state.selected_contact { "> " } else { "  " };
                 let safety = contact.fingerprint_hex.as_deref().unwrap_or("-");
+                let safety_number = if contact.safety_number.is_empty() {
+                    "-".to_owned()
+                } else {
+                    contact.safety_number.join(" ")
+                };
                 ListItem::new(format!(
-                    "{marker}{} {} -> {} {} verify={} fp={}",
+                    "{marker}{} {} -> {} {} verify={} fp={} sn={safety_number}",
                     contact.link_id,
                     contact.requester,
                     contact.target,
@@ -513,12 +529,15 @@ impl TuiApp {
     }
 
     async fn refresh_messages<B: TuiBus + Send>(&mut self, bus: &mut B) -> Result<(), TuiError> {
+        let conversation_id = self
+            .selected_conversation()
+            .map_or_else(|| DEFAULT_CONVERSATION_ID.to_owned(), |row| row.id.clone());
         let response = bus
             .request(
                 Some(self.state.account_id.clone()),
                 "message",
                 "message.read",
-                serde_json::json!({"conversation_id": DEFAULT_CONVERSATION_ID}),
+                serde_json::json!({"conversation_id": conversation_id}),
             )
             .await?;
         self.state.messages = parse_messages(&response);
@@ -1273,12 +1292,15 @@ impl TuiApp {
         let Some(message) = self.state.messages.get(self.state.selected_message).cloned() else {
             return Ok(());
         };
+        let conversation_id = self
+            .selected_conversation()
+            .map_or_else(|| DEFAULT_CONVERSATION_ID.to_owned(), |row| row.id.clone());
         bus.request(
             Some(self.state.account_id.clone()),
             "message",
             "message.delete",
             serde_json::json!({
-                "conversation_id": DEFAULT_CONVERSATION_ID,
+                "conversation_id": conversation_id,
                 "message_id": message.id,
             }),
         )

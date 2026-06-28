@@ -851,6 +851,46 @@ fn a2ui_unknown_component_uses_fallback_renderer() -> Result<(), TuiError> {
     Ok(())
 }
 
+/// A bus whose every request fails, so any input that touches the bus errors.
+struct FailingBus;
+
+#[async_trait]
+impl TuiBus for FailingBus {
+    async fn request(
+        &mut self,
+        _account_id: Option<String>,
+        _sdk_api: &str,
+        _method: &str,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, TuiError> {
+        Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("boom".to_owned())))
+    }
+
+    async fn next_event(&mut self) -> Result<ramflux_sdk::LocalBusFrame, TuiError> {
+        Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("no event".to_owned())))
+    }
+}
+
+#[tokio::test]
+async fn dispatch_input_surfaces_error_without_quitting() {
+    let mut bus = FailingBus;
+    let mut app = TuiApp::new("alice");
+    // Drive an input path that issues a bus request: composing a message on the
+    // Messages panel and pressing Enter calls the bus, which fails here.
+    app.state.selected_panel = Panel::Messages;
+    app.state.input = "hi".to_owned();
+    assert!(app.state.status_message.is_none());
+
+    app.dispatch_input(&mut bus, TuiInput::Enter).await;
+
+    assert!(!app.should_quit(), "event loop must keep running after an input error");
+    assert!(
+        app.state.status_message.as_deref().is_some_and(|status| status.starts_with("error:")),
+        "error should be surfaced to the status line: {:?}",
+        app.state.status_message
+    );
+}
+
 fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
     terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect()
 }
