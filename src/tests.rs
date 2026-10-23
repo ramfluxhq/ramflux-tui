@@ -255,6 +255,7 @@ fn mock_approvals() -> serde_json::Value {
 async fn renders_conversations_messages_contacts_and_groups() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
 
     let mut terminal = Terminal::new(TestBackend::new(100, 28))
@@ -324,6 +325,7 @@ async fn conversations_panel_uses_real_projection_over_synthetic_default() -> Re
         ..MockBus::default()
     };
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
 
     assert_eq!(app.state.conversations.len(), 2);
@@ -355,6 +357,7 @@ async fn conversations_panel_uses_real_projection_over_synthetic_default() -> Re
 async fn contact_panel_loads_safety_number_and_marks_verified() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Contacts;
 
@@ -373,6 +376,7 @@ async fn contacts_panel_adds_contact_with_commitments_and_switches_account() -> 
 {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Contacts;
 
@@ -409,6 +413,7 @@ async fn contacts_panel_adds_contact_with_commitments_and_switches_account() -> 
 async fn message_panel_surfaces_receipts_and_delete_actions() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.set_local_device_id("alice_device_tui");
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
@@ -447,6 +452,7 @@ async fn message_panel_surfaces_receipts_and_delete_actions() -> Result<(), TuiE
 async fn group_panel_surfaces_governance_actions() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
 
     app.remove_group_member(&mut bus, "bob", "alice").await?;
@@ -466,6 +472,7 @@ async fn group_panel_surfaces_governance_actions() -> Result<(), TuiError> {
 async fn contacts_panel_surfaces_device_restore_and_revoke() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
 
     app.refresh_devices(&mut bus).await?;
     app.activate_device(&mut bus, "device_tui_alice_b", "target_tui_alice_b", [0x22; 32], Some(2))
@@ -496,6 +503,7 @@ async fn contacts_panel_surfaces_device_restore_and_revoke() -> Result<(), TuiEr
 async fn contacts_panel_surfaces_own_device_sync_actions() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
 
     let envelope = serde_json::json!({
         "schema": "ramflux.sdk.own_device_sync.v1",
@@ -528,6 +536,7 @@ async fn contacts_panel_surfaces_own_device_sync_actions() -> Result<(), TuiErro
 async fn enter_in_message_panel_submits_plaintext_over_bus() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
     app.handle_input(&mut bus, TuiInput::EnterCompose).await?;
@@ -559,6 +568,7 @@ async fn enter_in_message_panel_submits_plaintext_over_bus() -> Result<(), TuiEr
 async fn compose_mode_submits_shortcut_characters_as_plaintext() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
 
@@ -593,6 +603,7 @@ async fn compose_mode_submits_shortcut_characters_as_plaintext() -> Result<(), T
 async fn compose_mode_keeps_keyboard_mapped_q_and_i_as_plaintext() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
 
@@ -616,6 +627,7 @@ async fn compose_mode_keeps_keyboard_mapped_q_and_i_as_plaintext() -> Result<(),
 async fn compose_mode_on_objects_preserves_command_letters() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Objects;
 
@@ -634,6 +646,7 @@ async fn compose_mode_on_objects_preserves_command_letters() -> Result<(), TuiEr
 async fn compose_enter_dispatches_object_command_and_resets_mode() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Objects;
 
@@ -658,6 +671,7 @@ async fn compose_enter_dispatches_object_command_and_resets_mode() -> Result<(),
 async fn input_title_reflects_compose_mode() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
 
@@ -679,6 +693,7 @@ async fn input_title_reflects_compose_mode() -> Result<(), TuiError> {
 #[test]
 fn gateway_deliver_event_refreshes_message_view() -> Result<(), TuiError> {
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.state.conversations.push(ConversationRow {
         id: DEFAULT_CONVERSATION_ID.to_owned(),
         title: "Default DM".to_owned(),
@@ -706,6 +721,10 @@ fn gateway_deliver_event_refreshes_message_view() -> Result<(), TuiError> {
             }]
         }),
         trace_id: None,
+        seq: None,
+        at: None,
+        deadline_ms: None,
+        operation_id: None,
         ok: None,
         error: None,
     };
@@ -721,6 +740,7 @@ async fn message_submit_uses_selected_conversation_recipient_for_bootstrap() -> 
 {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.state.conversations.push(ConversationRow {
         id: "conv_bootstrap".to_owned(),
         title: "Bob".to_owned(),
@@ -753,6 +773,7 @@ async fn message_submit_uses_selected_conversation_recipient_for_bootstrap() -> 
 async fn message_panel_submits_queued_attachment_over_bus() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
     app.queue_attachment_bytes_for_relay(
@@ -793,6 +814,7 @@ async fn message_panel_submits_queued_attachment_over_bus() -> Result<(), TuiErr
 async fn message_receive_auto_fetches_and_renders_attachment() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("bob_account");
+    app.set_legacy_poll(true);
     app.receive_messages_with_attachments(&mut bus).await?;
 
     let receive =
@@ -823,6 +845,7 @@ async fn message_receive_auto_fetches_and_renders_attachment() -> Result<(), Tui
 async fn object_panel_renders_transfer_progress_and_resumes() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_object_status(&mut bus, "object_tui_status", Some("upload")).await?;
     if let Some(row) = app.state.object_transfers.first_mut() {
         row.relay_endpoint = Some("http://relay.test".to_owned());
@@ -854,6 +877,7 @@ async fn object_panel_renders_transfer_progress_and_resumes() -> Result<(), TuiE
 #[test]
 fn mcp_approval_event_enters_approval_panel() -> Result<(), TuiError> {
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     let event = ramflux_sdk::LocalBusFrame {
         bus_protocol: "ramflux.local_bus.v1".to_owned(),
         frame_id: "frame_approval_test".to_owned(),
@@ -871,6 +895,10 @@ fn mcp_approval_event_enters_approval_panel() -> Result<(), TuiError> {
             "status": "pending"
         }),
         trace_id: None,
+        seq: None,
+        at: None,
+        deadline_ms: None,
+        operation_id: None,
         ok: None,
         error: None,
     };
@@ -885,6 +913,7 @@ fn mcp_approval_event_enters_approval_panel() -> Result<(), TuiError> {
 async fn approval_panel_approves_pending_request_over_bus() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Approvals;
     app.handle_input(&mut bus, TuiInput::Char('a')).await?;
@@ -907,6 +936,7 @@ async fn approval_panel_approves_pending_request_over_bus() -> Result<(), TuiErr
 async fn remote_app_approval_is_visible_and_not_locally_approved() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.approvals = parse_approvals(&serde_json::json!({
         "approvals": [{
@@ -981,6 +1011,7 @@ impl TuiBus for FailingBus {
 async fn dispatch_input_surfaces_error_without_quitting() {
     let mut bus = FailingBus;
     let mut app = TuiApp::new("alice");
+    app.set_legacy_poll(true);
     // Drive an input path that issues a bus request: composing a message on the
     // Messages panel and pressing Enter calls the bus, which fails here.
     app.state.selected_panel = Panel::Messages;
@@ -1001,6 +1032,7 @@ async fn dispatch_input_surfaces_error_without_quitting() {
 async fn empty_message_submit_surfaces_status_instead_of_silent_noop() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.state.selected_panel = Panel::Messages;
     assert_eq!(app.state.input, "");
 
@@ -1016,6 +1048,7 @@ async fn empty_message_submit_surfaces_status_instead_of_silent_noop() -> Result
 async fn decide_approval_with_no_selection_surfaces_status() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.state.selected_panel = Panel::Approvals;
     assert_eq!(app.state.approvals, Vec::<state::ApprovalRow>::new());
 
@@ -1030,6 +1063,7 @@ async fn decide_approval_with_no_selection_surfaces_status() -> Result<(), TuiEr
 async fn verify_refuses_blind_then_allows_after_safety_number() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
+    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Contacts;
     assert_eq!(app.state.contacts[0].safety_number, Vec::<String>::new());
@@ -1058,6 +1092,7 @@ async fn verify_refuses_blind_then_allows_after_safety_number() -> Result<(), Tu
 async fn decrypted_message_replaces_delivery_placeholder() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("bob_account");
+    app.set_legacy_poll(true);
     app.state.conversations.push(ConversationRow {
         id: DEFAULT_CONVERSATION_ID.to_owned(),
         title: "Default DM".to_owned(),
@@ -1087,6 +1122,10 @@ async fn decrypted_message_replaces_delivery_placeholder() -> Result<(), TuiErro
             }]
         }),
         trace_id: None,
+        seq: None,
+        at: None,
+        deadline_ms: None,
+        operation_id: None,
         ok: None,
         error: None,
     };

@@ -33,6 +33,8 @@ const PLACEHOLDER_MESSAGE_BODY: &str = "[new encrypted message]";
 pub struct TuiApp {
     pub state: TuiState,
     should_quit: bool,
+    pub(crate) legacy_poll: bool,
+    pub(crate) stream_cursors: std::collections::BTreeMap<String, u64>,
 }
 
 impl TuiApp {
@@ -42,6 +44,8 @@ impl TuiApp {
         Self {
             state: TuiState { account_id: account_id.into(), ..TuiState::default() },
             should_quit: false,
+            legacy_poll: false,
+            stream_cursors: std::collections::BTreeMap::new(),
         }
     }
 
@@ -64,7 +68,9 @@ impl TuiApp {
         self.open_subscription(bus).await?;
         self.refresh_conversations(bus).await?;
         self.refresh_messages(bus).await?;
-        self.receive_messages_with_attachments(bus).await?;
+        if self.legacy_poll {
+            self.receive_messages_with_attachments(bus).await?;
+        }
         self.refresh_contacts(bus).await?;
         self.refresh_devices(bus).await?;
         self.refresh_groups(bus).await?;
@@ -81,16 +87,10 @@ impl TuiApp {
         &mut self,
         bus: &mut B,
     ) -> Result<(), TuiError> {
-        bus.request(
-            Some(self.state.account_id.clone()),
-            "subscription",
-            "subscription.open",
-            serde_json::json!({
-                "topics": ["gateway.deliver", "conversation.updated", "mcp.approval.request"],
-                "attended_frontend": true,
-            }),
-        )
-        .await?;
+        if !self.legacy_poll {
+            return self.subscribe_stream(bus).await;
+        }
+        bus.request(Some(self.state.account_id.clone()),"subscription","subscription.open",serde_json::json!({"topics":["gateway.deliver","conversation.updated","mcp.approval.request"],"attended_frontend":true})).await?;
         Ok(())
     }
 
@@ -546,7 +546,7 @@ impl TuiApp {
     ///
     /// # Errors
     /// Returns an error when the local bus conversation list request fails.
-    async fn refresh_conversations<B: TuiBus + Send>(
+    pub(crate) async fn refresh_conversations<B: TuiBus + Send>(
         &mut self,
         bus: &mut B,
     ) -> Result<(), TuiError> {
@@ -568,7 +568,10 @@ impl TuiApp {
         Ok(())
     }
 
-    async fn refresh_messages<B: TuiBus + Send>(&mut self, bus: &mut B) -> Result<(), TuiError> {
+    pub(crate) async fn refresh_messages<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+    ) -> Result<(), TuiError> {
         let conversation_id = self
             .selected_conversation()
             .map_or_else(|| DEFAULT_CONVERSATION_ID.to_owned(), |row| row.id.clone());
@@ -634,7 +637,10 @@ impl TuiApp {
         Ok(())
     }
 
-    async fn refresh_contacts<B: TuiBus + Send>(&mut self, bus: &mut B) -> Result<(), TuiError> {
+    pub(crate) async fn refresh_contacts<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+    ) -> Result<(), TuiError> {
         let response = bus
             .request(
                 Some(self.state.account_id.clone()),
@@ -664,7 +670,10 @@ impl TuiApp {
         Ok(())
     }
 
-    async fn refresh_groups<B: TuiBus + Send>(&mut self, bus: &mut B) -> Result<(), TuiError> {
+    pub(crate) async fn refresh_groups<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+    ) -> Result<(), TuiError> {
         let response = bus
             .request(
                 Some(self.state.account_id.clone()),
@@ -677,7 +686,10 @@ impl TuiApp {
         Ok(())
     }
 
-    async fn refresh_approvals<B: TuiBus + Send>(&mut self, bus: &mut B) -> Result<(), TuiError> {
+    pub(crate) async fn refresh_approvals<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+    ) -> Result<(), TuiError> {
         let response = bus
             .request(
                 Some(self.state.account_id.clone()),

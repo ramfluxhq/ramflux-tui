@@ -7,6 +7,7 @@ mod bus;
 mod error;
 mod parsing;
 mod state;
+mod stream;
 #[cfg(test)]
 mod tests;
 

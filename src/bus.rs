@@ -53,7 +53,7 @@ impl TuiBus for SdkLocalBus {
         method: &str,
         body: serde_json::Value,
     ) -> Result<serde_json::Value, TuiError> {
-        Ok(self.client.request(account_id, sdk_api, method, &body).await?)
+        Ok(self.client.request(account_id, sdk_api, method, body).await?)
     }
 
     async fn next_event(&mut self) -> Result<ramflux_sdk::LocalBusFrame, TuiError> {
