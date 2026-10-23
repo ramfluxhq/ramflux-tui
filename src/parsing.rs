@@ -68,13 +68,23 @@ fn parse_receipt_rows(receipts: Option<&serde_json::Value>) -> Vec<MessageReceip
 }
 
 pub(crate) fn parse_transfer(response: &serde_json::Value) -> Option<ObjectTransferRow> {
-    let transfer = response.get("transfer")?;
+    let transfer = response.get("transfer").filter(|value| value.is_object()).unwrap_or(response);
+    let object_id = transfer.get("object_id").or_else(|| response.get("id"))?.as_str()?;
     Some(ObjectTransferRow {
-        object_id: string_field(transfer, "object_id", "object"),
+        object_id: object_id.to_owned(),
         direction: string_field(transfer, "direction", "unknown"),
-        state: string_field(transfer, "state", "unknown"),
+        state: transfer
+            .get("state")
+            .or_else(|| response.get("transfer_state"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned(),
         done_bytes: transfer.get("done_bytes").and_then(serde_json::Value::as_u64).unwrap_or(0),
-        total_bytes: transfer.get("total_bytes").and_then(serde_json::Value::as_u64).unwrap_or(0),
+        total_bytes: transfer
+            .get("total_bytes")
+            .or_else(|| response.get("size"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
         percent: transfer
             .get("percent")
             .and_then(serde_json::Value::as_u64)

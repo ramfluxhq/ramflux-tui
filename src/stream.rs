@@ -185,6 +185,22 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn remote_attachment_directory_row_keeps_its_identity_and_state() -> Result<(), TuiError>
+    {
+        let mut app = TuiApp::new("bob");
+        let mut bus = Bus::default();
+        let mut frame = event("object.changed", Some(11));
+        frame.body = serde_json::json!({"id":"deferred-attachment","transfer":null,
+            "transfer_state":"not_fetched","size":1234});
+        app.apply_stream_event(&mut bus, &frame).await?;
+        assert_eq!(app.state.object_transfers.len(), 1);
+        let row = &app.state.object_transfers[0];
+        assert_eq!(row.object_id, "deferred-attachment");
+        assert_eq!(row.state, "not_fetched");
+        assert_eq!(row.total_bytes, 1234);
+        Ok(())
+    }
+    #[tokio::test]
     async fn default_refresh_uses_cursor_subscription_and_content_reads_without_receive_polling()
     -> Result<(), TuiError> {
         let mut app = TuiApp::new("bob");
