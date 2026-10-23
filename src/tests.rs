@@ -645,7 +645,7 @@ async fn compose_enter_dispatches_object_command_and_resets_mode() -> Result<(),
     app.handle_input(&mut bus, TuiInput::Enter).await?;
 
     assert_eq!(app.state.input_mode, InputMode::Normal);
-    assert!(app.state.input.is_empty());
+    assert_eq!(app.state.input, "");
     assert!(bus.requests.iter().any(|request| {
         request.method == "object.transfer.status" && request.body["object_id"] == "object_resource"
     }));
@@ -1002,7 +1002,7 @@ async fn empty_message_submit_surfaces_status_instead_of_silent_noop() -> Result
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
     app.state.selected_panel = Panel::Messages;
-    assert!(app.state.input.is_empty());
+    assert_eq!(app.state.input, "");
 
     // Empty input must give visible feedback rather than silently returning Ok.
     app.dispatch_input(&mut bus, TuiInput::Enter).await;
@@ -1017,7 +1017,7 @@ async fn decide_approval_with_no_selection_surfaces_status() -> Result<(), TuiEr
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
     app.state.selected_panel = Panel::Approvals;
-    assert!(app.state.approvals.is_empty());
+    assert_eq!(app.state.approvals, Vec::<state::ApprovalRow>::new());
 
     app.handle_input(&mut bus, TuiInput::Char('a')).await?;
 
@@ -1032,7 +1032,7 @@ async fn verify_refuses_blind_then_allows_after_safety_number() -> Result<(), Tu
     let mut app = TuiApp::new("alice_account");
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Contacts;
-    assert!(app.state.contacts[0].safety_number.is_empty());
+    assert_eq!(app.state.contacts[0].safety_number, Vec::<String>::new());
 
     // Blind verify is refused while no safety number has been fetched.
     app.verify_selected_contact(&mut bus).await?;
@@ -1046,7 +1046,7 @@ async fn verify_refuses_blind_then_allows_after_safety_number() -> Result<(), Tu
 
     // Once the safety number is loaded, verify is allowed to proceed.
     app.refresh_selected_contact_safety(&mut bus).await?;
-    assert!(!app.state.contacts[0].safety_number.is_empty());
+    assert_ne!(app.state.contacts[0].safety_number, Vec::<String>::new());
     app.verify_selected_contact(&mut bus).await?;
     assert!(bus.requests.iter().any(|request| request.method == "contact.verify"));
     assert_eq!(app.state.contacts[0].verification_state, "verified");

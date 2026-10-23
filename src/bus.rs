@@ -7,6 +7,9 @@ use std::path::Path;
 use crate::TuiError;
 
 /// Local-bus surface consumed by the private UI.
+// `async_trait` emits `#[must_use]` on the generated boxed-future methods, which
+// clippy >= 1.99 reports as `double_must_use` at this trait definition.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait TuiBus {
     /// Sends a request to the local SDK bus.
