@@ -885,7 +885,7 @@ impl TuiApp {
         }
         self.refresh_devices(bus).await?;
         self.state.status_message =
-            Some(format!("Revoked {device_id} (signed device-set epoch {epoch})"));
+            Some(format!("Revocation submitted for {device_id} (signed device-set epoch {epoch})"));
         Ok(())
     }
 
