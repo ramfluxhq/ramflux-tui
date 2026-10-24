@@ -501,7 +501,7 @@ async fn contacts_panel_surfaces_device_restore_and_revoke() -> Result<(), TuiEr
     assert_eq!(revoke.body["device_id"], "device_tui_alice_b");
     assert_eq!(
         app.state.status_message.as_deref(),
-        Some("Revoked device_tui_alice_b (signed device-set epoch 3)")
+        Some("Revocation submitted for device_tui_alice_b (signed device-set epoch 3)")
     );
     assert!(bus.requests.iter().any(|request| request.method == "device.list"));
     Ok(())
@@ -715,10 +715,6 @@ fn gateway_deliver_event_refreshes_message_view() -> Result<(), TuiError> {
         bus_protocol: "ramflux.local_bus.v1".to_owned(),
         frame_id: "frame_evt_test".to_owned(),
         kind: ramflux_sdk::LocalBusFrameKind::Event,
-        seq: None,
-        at: None,
-        deadline_ms: None,
-        operation_id: None,
         request_id: "req_test".to_owned(),
         account_id: Some("alice_account".to_owned()),
         sdk_api: "gateway".to_owned(),
@@ -894,10 +890,6 @@ fn mcp_approval_event_enters_approval_panel() -> Result<(), TuiError> {
         bus_protocol: "ramflux.local_bus.v1".to_owned(),
         frame_id: "frame_approval_test".to_owned(),
         kind: ramflux_sdk::LocalBusFrameKind::Event,
-        seq: None,
-        at: None,
-        deadline_ms: None,
-        operation_id: None,
         request_id: "req_test".to_owned(),
         account_id: Some("alice_account".to_owned()),
         sdk_api: "mcp".to_owned(),
@@ -1124,10 +1116,6 @@ async fn decrypted_message_replaces_delivery_placeholder() -> Result<(), TuiErro
         bus_protocol: "ramflux.local_bus.v1".to_owned(),
         frame_id: "frame_evt_placeholder".to_owned(),
         kind: ramflux_sdk::LocalBusFrameKind::Event,
-        seq: None,
-        at: None,
-        deadline_ms: None,
-        operation_id: None,
         request_id: "req_placeholder".to_owned(),
         account_id: Some("bob_account".to_owned()),
         sdk_api: "gateway".to_owned(),
