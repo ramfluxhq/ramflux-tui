@@ -1153,3 +1153,18 @@ async fn decrypted_message_replaces_delivery_placeholder() -> Result<(), TuiErro
 fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
     terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect()
 }
+
+#[test]
+fn task_messages_render_their_text_fallback_and_unverified_kind_marker()
+-> Result<(), Box<dyn std::error::Error>> {
+    let response = serde_json::json!({"messages":[{"message_id":"task-message","sender_id":"agent-device","content_type":"task","actor_kind_verified":false,"body_utf8":"Task done (actor kind unverified)"}]});
+    let mut app = TuiApp::new("human");
+    app.state.messages = crate::parsing::parse_messages(&response);
+    assert_eq!(app.state.messages.len(), 1);
+    let mut terminal = Terminal::new(TestBackend::new(120, 28))?;
+    terminal.draw(|frame| app.render(frame))?;
+    let rendered = buffer_text(&terminal);
+    assert!(rendered.contains("Task done"));
+    assert!(rendered.contains("actor kind unverified"));
+    Ok(())
+}
