@@ -20,6 +20,7 @@ struct MockBus {
     /// which `parse_conversations` reads as "no real conversations" so the
     /// synthetic Default DM fallback still applies.
     conversation_list: serde_json::Value,
+    revoke_response: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -105,9 +106,12 @@ impl TuiBus for MockBus {
                     "is_local": true
                 }]
             }),
-            "device.revoke" => serde_json::json!({
-                "device_id": body.get("device_id").cloned().unwrap_or(serde_json::Value::Null),
-                "revoked": true
+            "device.revoke" => self.revoke_response.clone().unwrap_or_else(|| {
+                serde_json::json!({
+                    "device_id": body.get("device_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "revoked": true,
+                    "device_set_epoch":3
+                })
             }),
             "group.list" => serde_json::json!({
                 "groups": [{
@@ -495,6 +499,10 @@ async fn contacts_panel_surfaces_device_restore_and_revoke() -> Result<(), TuiEr
             TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing revoke".to_owned()))
         })?;
     assert_eq!(revoke.body["device_id"], "device_tui_alice_b");
+    assert_eq!(
+        app.state.status_message.as_deref(),
+        Some("Revoked device_tui_alice_b (signed device-set epoch 3)")
+    );
     assert!(bus.requests.iter().any(|request| request.method == "device.list"));
     Ok(())
 }
@@ -1152,4 +1160,19 @@ async fn decrypted_message_replaces_delivery_placeholder() -> Result<(), TuiErro
 
 fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
     terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect()
+}
+
+#[tokio::test]
+async fn revoke_requires_matching_device_and_signed_authority_epoch_before_success() {
+    for response in [
+        serde_json::json!({"device_id":"device","revoked":true}),
+        serde_json::json!({"device_id":"other","revoked":true,"device_set_epoch":3}),
+        serde_json::json!({"device_id":"device","revoked":false,"device_set_epoch":3}),
+    ] {
+        let mut bus = MockBus { revoke_response: Some(response), ..MockBus::default() };
+        let mut app = TuiApp::new("account");
+        assert!(app.revoke_device(&mut bus, "device").await.is_err());
+        assert!(app.state.status_message.is_none());
+        assert!(!bus.requests.iter().any(|r| r.method == "device.list"));
+    }
 }
