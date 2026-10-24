@@ -39,3 +39,8 @@ Ramflux TUI is licensed under AGPL-3.0-or-later with the Ramflux App Store
 Exception. See `LICENSE` and `LICENSING.md`.
 
 Ramflux is part of Span Brain.
+
+Device revocation requires a daemon acknowledgement containing the matching device,
+a successful revocation result and the signed device-set epoch. The contacts panel
+shows that epoch after success. Upgrade the daemon and SDK together for root-bound
+registration and signed revocation; older acknowledgements do not report success.

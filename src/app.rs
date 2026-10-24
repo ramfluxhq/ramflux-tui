@@ -865,14 +865,27 @@ impl TuiApp {
         bus: &mut B,
         device_id: &str,
     ) -> Result<(), TuiError> {
-        bus.request(
-            Some(self.state.account_id.clone()),
-            "device",
-            "device.revoke",
-            serde_json::json!({ "device_id": device_id }),
-        )
-        .await?;
+        let response = bus
+            .request(
+                Some(self.state.account_id.clone()),
+                "device",
+                "device.revoke",
+                serde_json::json!({ "device_id": device_id }),
+            )
+            .await?;
+        let epoch = response["device_set_epoch"].as_u64().filter(|e| *e > 0).ok_or_else(|| {
+            TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(
+                "signed device-set epoch missing from revoke acknowledgement".into(),
+            ))
+        })?;
+        if response["revoked"] != true || response["device_id"] != device_id {
+            return Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(
+                "device revoke acknowledgement mismatch".into(),
+            )));
+        }
         self.refresh_devices(bus).await?;
+        self.state.status_message =
+            Some(format!("Revoked {device_id} (signed device-set epoch {epoch})"));
         Ok(())
     }
 
