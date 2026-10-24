@@ -93,7 +93,8 @@ impl TuiApp {
             "message.received"
             | "message.updated"
             | "group.message.received"
-            | "conversation.changed" => {
+            | "conversation.changed"
+            | "task.changed" => {
                 self.refresh_conversations(bus).await?;
                 self.refresh_messages(bus).await?;
             }
@@ -218,6 +219,25 @@ mod tests {
         let calls = bus.calls.len();
         app.apply_stream_event(&mut bus, &event("message.received", Some(11))).await?;
         assert_eq!(bus.calls.len(), calls);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn task_changes_reload_message_fallback_without_driving_receive() -> Result<(), TuiError>
+    {
+        let mut app = TuiApp::new("bob");
+        let mut bus = Bus::default();
+        app.refresh_all(&mut bus).await?;
+        bus.calls.clear();
+        app.apply_stream_event(&mut bus, &event("task.changed", Some(11))).await?;
+        assert!(bus.calls.iter().any(|(method, _)| method == "message.read"));
+        assert!(bus.calls.iter().any(|(method, _)| method == "conversation.list"));
+        assert!(
+            bus.calls
+                .iter()
+                .all(|(method, _)| method != "message.receive" && method != "message.ack")
+        );
+        assert_eq!(app.stream_cursors["bob"], 11);
+        assert_eq!(app.state.messages[0].body, "read content");
         Ok(())
     }
     #[tokio::test]
