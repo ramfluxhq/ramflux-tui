@@ -13,9 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 # private UI shell over the open local bus client
-ramflux-protocol = { git = "https://github.com/ramfluxhq/ramflux.git", rev = "11877c9b81ffcfd1a07e18469213ea9f719f76f9", package = "ramflux-protocol" }
-ramflux-sdk = { git = "https://github.com/ramfluxhq/ramflux.git", rev = "11877c9b81ffcfd1a07e18469213ea9f719f76f9", package = "ramflux-sdk" }
-ramflux-sync = { git = "https://github.com/ramfluxhq/ramflux.git", rev = "11877c9b81ffcfd1a07e18469213ea9f719f76f9", package = "ramflux-sync" }
+ramflux-protocol = { git = "https://github.com/ramfluxhq/ramflux.git", rev = "d520bd7ced647cc9b6a49fb5675335b24051d483", package = "ramflux-protocol" }
+ramflux-sdk = { git = "https://github.com/ramfluxhq/ramflux.git", rev = "d520bd7ced647cc9b6a49fb5675335b24051d483", package = "ramflux-sdk" }
+ramflux-sync = { git = "https://github.com/ramfluxhq/ramflux.git", rev = "d520bd7ced647cc9b6a49fb5675335b24051d483", package = "ramflux-sync" }
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"
