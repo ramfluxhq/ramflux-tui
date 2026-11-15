@@ -10,30 +10,26 @@ use std::fmt::Write as _;
 
 use crate::a2ui_render::{approval_a2ui_suffix, dispatch_a2ui_approval_action};
 use crate::parsing::{
-    parse_approval_row, parse_approvals, parse_contacts, parse_conversations,
-    parse_decrypted_messages, parse_devices, parse_groups, parse_messages, parse_transfer,
+    parse_approval_row, parse_approvals, parse_contacts, parse_conversations, parse_devices,
+    parse_groups, parse_transfer,
 };
+use crate::read_model::{self, generated_code};
 use crate::{
-    ConversationRow, DEFAULT_CONVERSATION_ID, DEFAULT_TARGET_DELIVERY_ID, InputMode, MessageRow,
-    Panel, PendingAttachment, TuiBus, TuiError, TuiInput, TuiState,
+    ConversationRow, DEFAULT_CONVERSATION_ID, InputMode, MessageRow, Panel, PendingAttachment,
+    TuiBus, TuiError, TuiInput, TuiState,
 };
 
 const DEFAULT_OBJECT_CHUNK_SIZE: usize = 64 * 1024;
 const RELAY_URL_ENV: &str = "RAMFLUX_TUI_RELAY_URL";
 const RELAY_KEY_ENV: &str = "RAMFLUX_TUI_RELAY_SERVICE_KEY_BASE64";
-/// Body shown for a freshly-delivered envelope before the plaintext is decrypted.
-///
-/// Keyed by `envelope_id` in [`TuiApp::handle_bus_event`]; the decrypt path keys by
-/// `message_id`, so these stub rows are dropped once decrypted messages arrive to
-/// avoid a stale placeholder lingering next to the real copy.
-const PLACEHOLDER_MESSAGE_BODY: &str = "[new encrypted message]";
+/// Upper bound on consecutive change batches so a stuck `more` flag cannot spin.
+const MAX_CHANGE_ROUNDS: u32 = 8;
 
 /// TUI application controller.
 #[derive(Clone, Debug, Default)]
 pub struct TuiApp {
     pub state: TuiState,
     should_quit: bool,
-    pub(crate) legacy_poll: bool,
     pub(crate) stream_cursors: std::collections::BTreeMap<String, u64>,
 }
 
@@ -44,7 +40,6 @@ impl TuiApp {
         Self {
             state: TuiState { account_id: account_id.into(), ..TuiState::default() },
             should_quit: false,
-            legacy_poll: false,
             stream_cursors: std::collections::BTreeMap::new(),
         }
     }
@@ -65,12 +60,9 @@ impl TuiApp {
     /// # Errors
     /// Returns an error when any local bus projection request fails.
     pub async fn refresh_all<B: TuiBus + Send>(&mut self, bus: &mut B) -> Result<(), TuiError> {
-        self.open_subscription(bus).await?;
         self.refresh_conversations(bus).await?;
         self.refresh_messages(bus).await?;
-        if self.legacy_poll {
-            self.receive_messages_with_attachments(bus).await?;
-        }
+        self.subscribe_stream(bus).await?;
         self.refresh_contacts(bus).await?;
         self.refresh_devices(bus).await?;
         self.refresh_groups(bus).await?;
@@ -87,11 +79,7 @@ impl TuiApp {
         &mut self,
         bus: &mut B,
     ) -> Result<(), TuiError> {
-        if !self.legacy_poll {
-            return self.subscribe_stream(bus).await;
-        }
-        bus.request(Some(self.state.account_id.clone()),"subscription","subscription.open",serde_json::json!({"topics":["gateway.deliver","conversation.updated","mcp.approval.request"],"attended_frontend":true})).await?;
-        Ok(())
+        self.subscribe_stream(bus).await
     }
 
     /// Handles one UI input event, surfacing any error into the status line.
@@ -213,32 +201,7 @@ impl TuiApp {
     /// # Errors
     /// Returns an error when event contents cannot be parsed.
     pub fn handle_bus_event(&mut self, event: &ramflux_sdk::LocalBusFrame) -> Result<(), TuiError> {
-        if event.method == "gateway.deliver" || event.method == "conversation.updated" {
-            for entry in event
-                .body
-                .get("entries")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                let envelope_id = entry
-                    .pointer("/envelope/envelope_id")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("event");
-                let sender = entry
-                    .pointer("/envelope/source_principal_id")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("peer");
-                self.push_message(MessageRow {
-                    id: envelope_id.to_owned(),
-                    sender: sender.to_owned(),
-                    body: PLACEHOLDER_MESSAGE_BODY.to_owned(),
-                    status: "delivered".to_owned(),
-                    attachments: Vec::new(),
-                    receipts: Vec::new(),
-                });
-            }
-        } else if event.method == "mcp.approval.request" {
+        if event.method == "mcp.approval.request" {
             let row = parse_approval_row(&event.body);
             if let Some(existing) = self.state.approvals.iter_mut().find(|item| item.id == row.id) {
                 *existing = row;
@@ -413,23 +376,6 @@ impl TuiApp {
         suffix
     }
 
-    fn pending_attachments_json(attachments: &[PendingAttachment]) -> serde_json::Value {
-        serde_json::Value::Array(
-            attachments
-                .iter()
-                .map(|attachment| {
-                    serde_json::json!({
-                        "object_id": attachment.object_id,
-                        "plaintext_base64": attachment.plaintext_base64,
-                        "chunk_size": attachment.chunk_size,
-                        "relay_endpoint": attachment.relay_endpoint,
-                        "relay_service_key_base64": attachment.relay_service_key_base64,
-                    })
-                })
-                .collect(),
-        )
-    }
-
     fn render_contacts(&self, frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
         let mut items = self
             .state
@@ -580,61 +526,32 @@ impl TuiApp {
                 Some(self.state.account_id.clone()),
                 "message",
                 "message.read",
-                serde_json::json!({"conversation_id": conversation_id}),
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "read_model": true,
+                    "limit": 100
+                }),
             )
             .await?;
-        self.state.messages = parse_messages(&response);
+        let page = read_model::parse_page(&response)?;
+        if page.conversation_id != conversation_id {
+            return Err(TuiError::ReadModel("conversation_id mismatch".to_owned()));
+        }
+        read_model::reject_numeric_cursor_sequence(page.next_before.as_ref())?;
+        self.state.messages = page.messages;
+        self.stream_cursors.insert(self.state.account_id.clone(), page.snapshot_sequence);
         Ok(())
     }
 
-    /// Receives gateway messages and asks the SDK to auto-fetch/decrypt attachments.
+    /// Reloads the rendered message page. The volatile receive page is not a render source.
     ///
     /// # Errors
-    /// Returns an error when the local bus receive request fails.
+    /// Returns an error when the read-model request fails.
     pub async fn receive_messages_with_attachments<B: TuiBus + Send>(
         &mut self,
         bus: &mut B,
     ) -> Result<(), TuiError> {
-        self.receive_messages_with_attachment_relay_key(bus, Self::relay_service_key_base64()).await
-    }
-
-    /// Receives gateway messages and auto-fetches/decrypts attachments with an explicit relay key.
-    ///
-    /// # Errors
-    /// Returns an error when the local bus receive request fails.
-    pub async fn receive_messages_with_attachment_relay_key<B: TuiBus + Send>(
-        &mut self,
-        bus: &mut B,
-        relay_service_key_base64: Option<String>,
-    ) -> Result<(), TuiError> {
-        let conversation_id = self
-            .selected_conversation()
-            .map_or_else(|| DEFAULT_CONVERSATION_ID.to_owned(), |row| row.id.clone());
-        let response = bus
-            .request(
-                Some(self.state.account_id.clone()),
-                "message",
-                "message.receive",
-                serde_json::json!({
-                    "limit": 100,
-                    "conversation_id": conversation_id,
-                    "auto_fetch_attachments": true,
-                    "relay_service_key_base64": relay_service_key_base64,
-                }),
-            )
-            .await?;
-        let decrypted = parse_decrypted_messages(&response);
-        if !decrypted.is_empty() {
-            // Decrypted rows are keyed by `message_id`; the live-delivery placeholders are
-            // keyed by `envelope_id`, so they would never be matched by `upsert_message`.
-            // Drop the stale stubs here so the decrypted copy replaces them instead of
-            // sitting beside a lingering "[new encrypted message]".
-            self.drop_placeholder_messages();
-        }
-        for message in decrypted {
-            self.upsert_message(message);
-        }
-        Ok(())
+        self.refresh_messages(bus).await
     }
 
     pub(crate) async fn refresh_contacts<B: TuiBus + Send>(
@@ -738,94 +655,47 @@ impl TuiApp {
             return Ok(());
         }
         let body = std::mem::take(&mut self.state.input);
-        if let Some(path) = body.strip_prefix("/attach ") {
-            self.queue_attachment_path(path.trim())?;
+        if let Some(_path) = body.strip_prefix("/attach ") {
+            self.state.status_message = Some(
+                "conversation.send does not accept attachment bytes; use the object panel"
+                    .to_owned(),
+            );
             return Ok(());
         }
-        let created_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX));
-        let message_id = format!("tui_msg_{}", self.state.next_message_id);
-        let envelope_id = format!("tui_env_{}", self.state.next_message_id);
+        if !self.state.pending_attachments.is_empty() {
+            self.state.status_message = Some(
+                "queued attachment bytes were not sent; conversation.send accepts media refs only"
+                    .to_owned(),
+            );
+        }
+        let conversation_id = self
+            .selected_conversation()
+            .map_or_else(|| DEFAULT_CONVERSATION_ID.to_owned(), |row| row.id.clone());
+        let operation_id = format!("tui-{}-{}", self.state.account_id, self.state.next_message_id);
         self.state.next_message_id = self.state.next_message_id.saturating_add(1);
-        let conversation = self.selected_conversation();
-        let conversation_id =
-            conversation.map_or_else(|| DEFAULT_CONVERSATION_ID.to_owned(), |row| row.id.clone());
-        let recipient_device_id =
-            conversation.and_then(|row| row.recipient_device_id.as_ref()).cloned();
-        let target_delivery_id = conversation
-            .and_then(|row| row.target_delivery_id.as_ref())
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_TARGET_DELIVERY_ID.to_owned());
-        let account_status = self.account_status(bus).await?;
-        let source_principal_id = account_status
-            .get("principal_id")
+        if operation_id.len() > 256 {
+            return Err(TuiError::ReadModel("operation_id is longer than 256 bytes".to_owned()));
+        }
+        let response = bus
+            .request_operation(
+                Some(self.state.account_id.clone()),
+                "conversation",
+                "conversation.send",
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "text": body,
+                    "media": []
+                }),
+                operation_id.clone(),
+            )
+            .await?;
+        let message_id = response
+            .get("client_message_id")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or(self.state.account_id.as_str())
-            .to_owned();
-        let sender_id = self
-            .state
-            .local_device_id
-            .clone()
-            .or_else(|| {
-                account_status
-                    .get("device_id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| self.state.account_id.clone());
-        let attachments = std::mem::take(&mut self.state.pending_attachments);
-        let attachment_payload = Self::pending_attachments_json(&attachments);
-        bus.request(
-            Some(self.state.account_id.clone()),
-            "message",
-            "message.submit",
-            serde_json::json!({
-                "conversation_id": conversation_id,
-                "message_id": message_id,
-                "envelope_id": envelope_id,
-                "source_principal_id": source_principal_id,
-                "sender_id": sender_id,
-                "recipient_device_id": recipient_device_id,
-                "target_delivery_id": target_delivery_id,
-                "encrypted_body_base64": "",
-                "plaintext_body_base64": ramflux_protocol::encode_base64url(body.as_bytes()),
-                "created_at": created_at,
-                "ttl": 3_600_u32,
-                "attachments": attachment_payload,
-            }),
-        )
-        .await?;
-        self.push_message(MessageRow {
-            id: message_id,
-            sender: "me".to_owned(),
-            body,
-            status: "sending".to_owned(),
-            attachments: attachments
-                .into_iter()
-                .map(|attachment| crate::AttachmentRow {
-                    message_id: envelope_id.clone(),
-                    object_id: attachment.object_id,
-                    status: "uploading".to_owned(),
-                    plaintext_base64: None,
-                })
-                .collect(),
-            receipts: Vec::new(),
-        });
+            .filter(|value| !value.is_empty())
+            .map_or(operation_id, str::to_owned);
+        self.push_message(MessageRow::local_send(message_id, body));
         Ok(())
-    }
-
-    async fn account_status<B: TuiBus + Send>(
-        &self,
-        bus: &mut B,
-    ) -> Result<serde_json::Value, TuiError> {
-        bus.request(
-            Some(self.state.account_id.clone()),
-            "account",
-            "account.status",
-            serde_json::json!({}),
-        )
-        .await
     }
 
     /// Activates a restored device through the SDK manifest-publish path.
@@ -1874,29 +1744,114 @@ impl TuiApp {
         }
     }
 
-    fn upsert_message(&mut self, message: MessageRow) {
+    pub(crate) fn apply_read_model_row(&mut self, message: MessageRow) {
         if let Some(existing) = self.state.messages.iter_mut().find(|row| row.id == message.id) {
             *existing = message;
-        } else {
-            self.push_message(message);
-        }
-    }
-
-    /// Removes live-delivery placeholder rows once their decrypted copies are available.
-    fn drop_placeholder_messages(&mut self) {
-        let before = self.state.messages.len();
-        self.state.messages.retain(|row| row.body != PLACEHOLDER_MESSAGE_BODY);
-        let removed = before - self.state.messages.len();
-        if removed == 0 {
             return;
         }
-        if let Some(conversation) = self.state.conversations.first_mut() {
-            // The placeholder bumped `unread` when it was pushed; undo that bump so the
-            // decrypted copy does not double-count.
-            conversation.unread = conversation.unread.saturating_sub(removed);
-            conversation.last_message =
-                self.state.messages.last().map_or_else(String::new, |row| row.body.clone());
+        self.state.messages.insert(0, message);
+    }
+
+    /// Applies a typed generated refusal. `target_not_found` drops that row and nothing else.
+    pub(crate) fn apply_typed_refusal(&mut self, name: &str, message_id: Option<&str>) {
+        if name == ramflux_sdk::bindings::GeneratedErrorCode::TargetNotFound.name()
+            && let Some(id) = message_id
+        {
+            self.state.messages.retain(|row| row.id != id);
         }
+        self.state.status_message = Some(name.to_owned());
+    }
+
+    /// Drops the message cache and loads a fresh rendered page.
+    ///
+    /// # Errors
+    /// Returns an error when the page request fails.
+    pub(crate) async fn resync_messages<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+    ) -> Result<(), TuiError> {
+        self.state.messages.clear();
+        self.stream_cursors.remove(&self.state.account_id);
+        self.refresh_messages(bus).await
+    }
+
+    /// Reads durable changes after the stored cursor and replaces rows with the same id.
+    ///
+    /// # Errors
+    /// Returns an error when a change read fails with a code this client does not handle.
+    pub(crate) async fn follow_message_changes<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+    ) -> Result<bool, TuiError> {
+        if !self.stream_cursors.contains_key(&self.state.account_id) {
+            self.resync_messages(bus).await?;
+            return Ok(true);
+        }
+        let account = self.state.account_id.clone();
+        let conversation_id = self
+            .selected_conversation()
+            .map_or_else(|| DEFAULT_CONVERSATION_ID.to_owned(), |row| row.id.clone());
+        for _ in 0..MAX_CHANGE_ROUNDS {
+            let after = self.stream_cursors.get(&account).copied();
+            let Some(after) = after else {
+                self.resync_messages(bus).await?;
+                return Ok(true);
+            };
+            let body = serde_json::json!({
+                "conversation_id": conversation_id,
+                "after_sequence": after,
+                "limit": 100
+            });
+            let response = match bus
+                .request(Some(account.clone()), "message", "message.read", body.clone())
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => return self.handle_change_error(bus, &body, error).await,
+            };
+            let batch = read_model::parse_changes(&response)?;
+            if batch.conversation_id != conversation_id {
+                return Err(TuiError::ReadModel("conversation_id mismatch".to_owned()));
+            }
+            for row in batch.changes {
+                self.apply_read_model_row(row);
+            }
+            self.stream_cursors.insert(account.clone(), batch.next_after);
+            if !batch.more {
+                return Ok(false);
+            }
+        }
+        self.state.status_message =
+            Some("message change batch stopped at the round limit".to_owned());
+        Ok(false)
+    }
+
+    async fn handle_change_error<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+        body: &serde_json::Value,
+        error: TuiError,
+    ) -> Result<bool, TuiError> {
+        let name = generated_code(&error).map(str::to_owned);
+        let Some(name) = name else {
+            return Err(error);
+        };
+        if name == ramflux_sdk::bindings::GeneratedErrorCode::ResyncRequired.name() {
+            self.resync_messages(bus).await?;
+            return Ok(true);
+        }
+        let stops = [
+            ramflux_sdk::bindings::GeneratedErrorCode::TargetNotFound.name(),
+            ramflux_sdk::bindings::GeneratedErrorCode::SchemaResetRequired.name(),
+            ramflux_sdk::bindings::GeneratedErrorCode::Internal.name(),
+            ramflux_sdk::bindings::GeneratedErrorCode::PayloadTooLarge.name(),
+        ];
+        if stops.iter().any(|item| *item == name) {
+            let message_id = body.get("message_id").and_then(serde_json::Value::as_str);
+            self.apply_typed_refusal(&name, message_id);
+            return Ok(false);
+        }
+        Err(error)
     }
 
     fn apply_transfer_response(&mut self, response: &serde_json::Value) {

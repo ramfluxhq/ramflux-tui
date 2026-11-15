@@ -2,70 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use crate::a2ui_render::render_a2ui_for_approval;
-use crate::{
-    ApprovalRow, AttachmentRow, ContactRow, ConversationRow, DeviceRow, GroupRow,
-    MessageReceiptRow, MessageRow, ObjectTransferRow,
-};
-
-pub(crate) fn parse_messages(response: &serde_json::Value) -> Vec<MessageRow> {
-    let mut rows = response
-        .get("messages")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|message| MessageRow {
-            id: string_field(message, "message_id", "message"),
-            sender: string_field(message, "sender_id", "peer"),
-            body: string_field(message, "body_utf8", "[encrypted message]"),
-            status: "sent".to_owned(),
-            attachments: parse_attachment_rows(
-                &string_field(message, "message_id", "message"),
-                message.get("attachments"),
-            ),
-            receipts: parse_receipt_rows(message.get("receipts")),
-        })
-        .collect::<Vec<_>>();
-    rows.extend(parse_decrypted_messages(response));
-    rows
-}
-
-pub(crate) fn parse_decrypted_messages(response: &serde_json::Value) -> Vec<MessageRow> {
-    response
-        .get("decrypted_messages")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|message| {
-            let id = string_field(message, "message_id", "message");
-            let body = message
-                .get("plaintext_body_base64")
-                .and_then(serde_json::Value::as_str)
-                .and_then(|value| ramflux_protocol::decode_base64url(value).ok())
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-                .unwrap_or_else(|| "[encrypted message]".to_owned());
-            MessageRow {
-                id: id.clone(),
-                sender: string_field(message, "sender_id", "peer"),
-                body,
-                status: "received".to_owned(),
-                attachments: parse_attachment_rows(&id, message.get("attachments")),
-                receipts: parse_receipt_rows(message.get("receipts")),
-            }
-        })
-        .collect()
-}
-
-fn parse_receipt_rows(receipts: Option<&serde_json::Value>) -> Vec<MessageReceiptRow> {
-    receipts
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|receipt| MessageReceiptRow {
-            device_id: string_field(receipt, "device_id", "device"),
-            state: string_field(receipt, "state", "delivered"),
-        })
-        .collect()
-}
+use crate::{ApprovalRow, ContactRow, ConversationRow, DeviceRow, GroupRow, ObjectTransferRow};
 
 pub(crate) fn parse_transfer(response: &serde_json::Value) -> Option<ObjectTransferRow> {
     let transfer = response.get("transfer").filter(|value| value.is_object()).unwrap_or(response);
@@ -97,30 +34,6 @@ pub(crate) fn parse_transfer(response: &serde_json::Value) -> Option<ObjectTrans
         relay_endpoint: None,
         relay_service_key_base64: None,
     })
-}
-
-fn parse_attachment_rows(
-    message_id: &str,
-    attachments: Option<&serde_json::Value>,
-) -> Vec<AttachmentRow> {
-    attachments
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|attachment| AttachmentRow {
-            message_id: message_id.to_owned(),
-            object_id: string_field(attachment, "object_id", "object"),
-            status: if attachment.get("plaintext_base64").is_some() {
-                "decrypted".to_owned()
-            } else {
-                string_field(attachment, "status", "referenced")
-            },
-            plaintext_base64: attachment
-                .get("plaintext_base64")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
-        })
-        .collect()
 }
 
 /// Parses the real conversations projection returned by `conversation.list`.

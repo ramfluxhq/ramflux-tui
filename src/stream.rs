@@ -2,68 +2,47 @@
 // Copyright (c) 2026 Span Brain
 
 //! Account-scoped cursors and read-side refreshes driven by the daemon journal.
+use crate::read_model::generated_code;
 use crate::{TuiApp, TuiBus, TuiError};
 impl TuiApp {
-    /// Enables the one-release compatibility mode for daemons without a journal.
-    pub const fn set_legacy_poll(&mut self, enabled: bool) {
-        self.legacy_poll = enabled;
-    }
-
     pub(crate) async fn subscribe_stream<B: TuiBus + Send>(
         &mut self,
         bus: &mut B,
     ) -> Result<(), TuiError> {
+        self.subscribe_once(bus, true).await
+    }
+
+    async fn subscribe_once<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+        recover: bool,
+    ) -> Result<(), TuiError> {
+        let response = self.request_subscription(bus).await;
+        if recover && response.as_ref().is_err_and(is_resync_required) {
+            let account = self.state.account_id.clone();
+            self.state.messages.clear();
+            self.stream_cursors.remove(&account);
+            self.refresh_messages(bus).await?;
+            let retry = self.request_subscription(bus).await;
+            return self.finish_subscription(retry);
+        }
+        self.finish_subscription(response)
+    }
+
+    async fn request_subscription<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+    ) -> Result<serde_json::Value, TuiError> {
         let account = self.state.account_id.clone();
         let cursor = self.stream_cursors.get(&account).copied();
-        let topics = serde_json::json!([
-            "message.received",
-            "message.updated",
-            "group.message.received",
-            "group.changed",
-            "conversation.changed",
-            "contact.changed",
-            "safety.changed",
-            "object.transfer.progress",
-            "object.changed",
-            "account.state",
-            "node.health",
-            "sync.status",
-            "mcp.approval.request",
-            "mcp.approval.granted",
-            "mcp.approval.denied",
-            "surface.changed",
-            "task.changed"
-        ]);
-        let response = bus
-            .request(
-                Some(account.clone()),
-                "stream",
-                "bus.subscribe",
-                serde_json::json!({"topics":topics,"since_seq":cursor,"attended_frontend":true}),
-            )
-            .await;
-        let response = match response {
-            Err(error) if error.to_string().contains("resync_required") => {
-                // Subscribe first, then load snapshots: concurrent writes remain queued for replay.
-                let response = bus
-                    .request(
-                        Some(account.clone()),
-                        "stream",
-                        "bus.subscribe",
-                        serde_json::json!({"topics":topics,"attended_frontend":true}),
-                    )
-                    .await?;
-                self.stream_cursors.remove(&account);
-                response
-            }
-            other => other?,
-        };
-        if !self.stream_cursors.contains_key(&account)
-            && let Some(head) = response.get("head_seq").and_then(serde_json::Value::as_u64)
-        {
-            self.stream_cursors.insert(account, head);
-        }
-        Ok(())
+        let topics = stream_topics();
+        bus.request(
+            Some(account),
+            "stream",
+            "bus.subscribe",
+            serde_json::json!({"topics":topics,"since_seq":cursor,"attended_frontend":true}),
+        )
+        .await
     }
 
     /// Applies metadata invalidations through content read methods, committing the cursor last.
@@ -78,25 +57,30 @@ impl TuiApp {
         if event.account_id.as_deref() != Some(self.state.account_id.as_str()) {
             return Ok(());
         }
-        if self.legacy_poll {
-            return self.handle_bus_event(event);
+        if event.method == "message.transient" {
+            return Ok(());
         }
         if event.method == "stream.lagged" {
-            return self.refresh_all(bus).await;
+            self.follow_message_changes(bus).await?;
+            return self.subscribe_once(bus, false).await;
         }
         if let Some(seq) = event.seq
             && self.stream_cursors.get(&self.state.account_id).is_some_and(|cursor| seq <= *cursor)
         {
             return Ok(());
         }
+        let mut resynced = false;
         match event.method.as_str() {
-            "message.received"
+            "message.schema.updated"
+            | "state.changed"
+            | "message.received"
             | "message.updated"
-            | "group.message.received"
-            | "conversation.changed"
-            | "task.changed" => {
+            | "group.message.received" => {
+                resynced = self.follow_message_changes(bus).await?;
+            }
+            "conversation.changed" | "task.changed" => {
                 self.refresh_conversations(bus).await?;
-                self.refresh_messages(bus).await?;
+                resynced = self.follow_message_changes(bus).await?;
             }
             "group.changed" => self.refresh_groups(bus).await?,
             "contact.changed" | "safety.changed" => self.refresh_contacts(bus).await?,
@@ -118,15 +102,73 @@ impl TuiApp {
                         self.state.object_transfers.push(row);
                     }
                 }
-                self.refresh_messages(bus).await?;
+                resynced = self.follow_message_changes(bus).await?;
             }
             _ => {}
         }
-        if let Some(seq) = event.seq {
-            self.stream_cursors.insert(self.state.account_id.clone(), seq);
+        if !resynced && let Some(seq) = event.seq {
+            let account = self.state.account_id.clone();
+            let ahead = self.stream_cursors.get(&account).is_none_or(|cursor| seq > *cursor);
+            if ahead {
+                self.stream_cursors.insert(account, seq);
+            }
         }
         Ok(())
     }
+
+    fn finish_subscription(
+        &mut self,
+        response: Result<serde_json::Value, TuiError>,
+    ) -> Result<(), TuiError> {
+        let response = match response {
+            Err(error) if is_schema_reset(&error) => {
+                self.state.status_message = Some("schema_reset_required".to_owned());
+                return Ok(());
+            }
+            other => other?,
+        };
+        let account = self.state.account_id.clone();
+        if !self.stream_cursors.contains_key(&account)
+            && let Some(head) = response.get("head_seq").and_then(serde_json::Value::as_u64)
+        {
+            self.stream_cursors.insert(account, head);
+        }
+        Ok(())
+    }
+}
+
+fn is_resync_required(error: &TuiError) -> bool {
+    generated_code(error) == Some(ramflux_sdk::bindings::GeneratedErrorCode::ResyncRequired.name())
+}
+
+fn is_schema_reset(error: &TuiError) -> bool {
+    generated_code(error)
+        == Some(ramflux_sdk::bindings::GeneratedErrorCode::SchemaResetRequired.name())
+}
+
+fn stream_topics() -> serde_json::Value {
+    serde_json::json!([
+        "message.schema.updated",
+        "state.changed",
+        "message.transient",
+        "message.received",
+        "message.updated",
+        "group.message.received",
+        "group.changed",
+        "conversation.changed",
+        "contact.changed",
+        "safety.changed",
+        "object.transfer.progress",
+        "object.changed",
+        "account.state",
+        "node.health",
+        "sync.status",
+        "mcp.approval.request",
+        "mcp.approval.granted",
+        "mcp.approval.denied",
+        "surface.changed",
+        "task.changed"
+    ])
 }
 
 #[cfg(test)]
@@ -136,24 +178,50 @@ mod tests {
     #[derive(Default)]
     struct Bus {
         calls: Vec<(String, serde_json::Value)>,
-        resync: bool,
+        /// Typed `resync_required` once, when `since_seq` is a number.
+        typed_resync: bool,
+        /// Text error that merely contains the words `resync_required`.
+        text_resync: bool,
     }
     #[async_trait]
     impl TuiBus for Bus {
         async fn request(
             &mut self,
+            account_id: Option<String>,
+            sdk_api: &str,
+            method: &str,
+            body: serde_json::Value,
+        ) -> Result<serde_json::Value, TuiError> {
+            self.request_operation(account_id, sdk_api, method, body, String::new()).await
+        }
+        async fn request_operation(
+            &mut self,
             _: Option<String>,
             _: &str,
             method: &str,
             body: serde_json::Value,
+            _: String,
         ) -> Result<serde_json::Value, TuiError> {
             self.calls.push((method.to_owned(), body.clone()));
+            let conversation =
+                body.get("conversation_id").and_then(serde_json::Value::as_str).unwrap_or("thread");
             Ok(match method {
                 "bus.subscribe" => {
-                    if self.resync && body["since_seq"].is_u64() {
-                        self.resync = false;
+                    if self.typed_resync && body["since_seq"].is_u64() {
+                        self.typed_resync = false;
+                        return Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBusRefused {
+                            code: ramflux_sdk::bindings::GeneratedErrorCode::ResyncRequired
+                                .name()
+                                .to_owned(),
+                            message: "cursor pruned".to_owned(),
+                            body: Box::new(
+                                serde_json::json!({"cursor": 999, "floor": 1, "head": 10}),
+                            ),
+                        }));
+                    }
+                    if self.text_resync && body["since_seq"].is_u64() {
                         return Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(
-                            "resync_required".to_owned(),
+                            "daemon text says resync_required".to_owned(),
                         )));
                     }
                     serde_json::json!({"subscribed":true,"head_seq":10,"floor_seq":1})
@@ -161,8 +229,13 @@ mod tests {
                 "conversation.list" => {
                     serde_json::json!({"conversations":[{"conversation_id":"thread","unread_count":1}]})
                 }
+                "message.read" if body.get("after_sequence").is_some() => {
+                    let after =
+                        body.get("after_sequence").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                    crate::read_model::sample_changes(conversation, after)
+                }
                 "message.read" => {
-                    serde_json::json!({"messages":[{"message_id":"message","sender_id":"peer","body_utf8":"read content"}]})
+                    crate::read_model::sample_page(conversation, "message", "read content")
                 }
                 _ => serde_json::json!({}),
             })
@@ -207,13 +280,23 @@ mod tests {
         let mut app = TuiApp::new("bob");
         let mut bus = Bus::default();
         app.refresh_all(&mut bus).await?;
-        assert_eq!(bus.calls[0].0, "bus.subscribe");
+        let read =
+            bus.calls.iter().find(|(method, _)| method == "message.read").ok_or_else(|| {
+                TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing read".to_owned()))
+            })?;
+        assert_eq!(read.1["read_model"], true);
+        let subscribe =
+            bus.calls.iter().find(|(method, _)| method == "bus.subscribe").ok_or_else(|| {
+                TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing subscribe".to_owned()))
+            })?;
+        assert_eq!(subscribe.1["since_seq"], 10);
         assert!(
             bus.calls
                 .iter()
                 .all(|(method, _)| method != "message.receive" && method != "message.ack")
         );
         assert_eq!(app.state.messages[0].body, "read content");
+        assert_eq!(app.state.messages[0].device_sequence, "00000000000000000007");
         app.apply_stream_event(&mut bus, &event("message.received", Some(11))).await?;
         assert_eq!(app.stream_cursors["bob"], 11);
         let calls = bus.calls.len();
@@ -229,7 +312,11 @@ mod tests {
         app.refresh_all(&mut bus).await?;
         bus.calls.clear();
         app.apply_stream_event(&mut bus, &event("task.changed", Some(11))).await?;
-        assert!(bus.calls.iter().any(|(method, _)| method == "message.read"));
+        assert!(bus.calls.iter().any(|(method, body)| {
+            method == "message.read"
+                && body.get("after_sequence").is_some()
+                && body.get("read_model").is_none()
+        }));
         assert!(bus.calls.iter().any(|(method, _)| method == "conversation.list"));
         assert!(
             bus.calls
@@ -246,14 +333,64 @@ mod tests {
         let mut bus = Bus::default();
         app.refresh_all(&mut bus).await?;
         app.apply_stream_event(&mut bus, &event("message.updated", Some(11))).await?;
-        bus.resync = true;
         app.apply_stream_event(&mut bus, &event("stream.lagged", None)).await?;
         let subscriptions =
             bus.calls.iter().filter(|(method, _)| method == "bus.subscribe").collect::<Vec<_>>();
+        assert_eq!(subscriptions[0].1["since_seq"], 10);
         assert_eq!(subscriptions[1].1["since_seq"], 11);
-        assert!(subscriptions[2].1["since_seq"].is_null());
-        assert_eq!(app.stream_cursors["bob"], 10);
+        assert!(subscriptions.iter().all(|(_, body)| !body["since_seq"].is_null()));
+        assert_eq!(app.stream_cursors["bob"], 11);
         assert_eq!(app.state.messages[0].body, "read content");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn typed_resync_drops_the_cache_and_reloads_the_page() -> Result<(), TuiError> {
+        let mut app = TuiApp::new("bob");
+        let mut bus = Bus::default();
+        app.refresh_all(&mut bus).await?;
+        app.state
+            .messages
+            .insert(0, crate::MessageRow::local_send("stale".to_owned(), "stale body".to_owned()));
+        app.stream_cursors.insert("bob".to_owned(), 999);
+        bus.typed_resync = true;
+        app.subscribe_stream(&mut bus).await?;
+        assert!(app.state.messages.iter().all(|message| message.id != "stale"));
+        assert_eq!(app.state.messages[0].body, "read content");
+        assert_eq!(app.stream_cursors["bob"], 10);
+        let subscriptions =
+            bus.calls.iter().filter(|(method, _)| method == "bus.subscribe").collect::<Vec<_>>();
+        assert_eq!(
+            subscriptions.last().map(|(_, body)| &body["since_seq"]),
+            Some(&serde_json::json!(10))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_resync_required_does_not_drop_the_cache() -> Result<(), TuiError> {
+        let mut app = TuiApp::new("bob");
+        let mut bus = Bus::default();
+        app.refresh_all(&mut bus).await?;
+        app.state
+            .messages
+            .insert(0, crate::MessageRow::local_send("kept".to_owned(), "kept body".to_owned()));
+        bus.text_resync = true;
+        let error = match app.subscribe_stream(&mut bus).await {
+            Ok(()) => {
+                return Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(
+                    "text error was treated as success".to_owned(),
+                )));
+            }
+            Err(error) => error,
+        };
+        assert!(crate::read_model::generated_code(&error).is_none());
+        assert!(
+            app.state
+                .messages
+                .iter()
+                .any(|message| message.id == "kept" && message.body == "kept body")
+        );
         Ok(())
     }
 }

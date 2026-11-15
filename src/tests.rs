@@ -29,11 +29,11 @@ struct MockRequest {
     sdk_api: String,
     method: String,
     body: serde_json::Value,
+    operation_id: Option<String>,
 }
 
 #[async_trait]
 impl TuiBus for MockBus {
-    #[allow(clippy::too_many_lines)]
     async fn request(
         &mut self,
         account_id: Option<String>,
@@ -41,20 +41,41 @@ impl TuiBus for MockBus {
         method: &str,
         body: serde_json::Value,
     ) -> Result<serde_json::Value, TuiError> {
+        self.request_operation(account_id, sdk_api, method, body, String::new()).await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn request_operation(
+        &mut self,
+        account_id: Option<String>,
+        sdk_api: &str,
+        method: &str,
+        body: serde_json::Value,
+        operation_id: String,
+    ) -> Result<serde_json::Value, TuiError> {
         self.requests.push(MockRequest {
             account_id,
             sdk_api: sdk_api.to_owned(),
             method: method.to_owned(),
             body: body.clone(),
+            operation_id: if operation_id.is_empty() { None } else { Some(operation_id) },
         });
+        let conversation = body
+            .get("conversation_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(crate::DEFAULT_CONVERSATION_ID);
         Ok(match method {
-            "message.read" => serde_json::json!({
-                "messages": [{
-                    "message_id": "msg_tui_1",
-                    "sender_id": "alice",
-                    "body_utf8": "hello from bus"
-                }]
-            }),
+            "message.read" if body.get("after_sequence").is_some() => {
+                let after =
+                    body.get("after_sequence").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                crate::read_model::sample_changes(conversation, after)
+            }
+            "message.read" => {
+                crate::read_model::sample_page(conversation, "msg_tui_1", "hello from bus")
+            }
+            "bus.subscribe" => {
+                serde_json::json!({"subscribed": true, "head_seq": 10, "floor_seq": 1})
+            }
             "contact.list" => serde_json::json!({
                 "contacts": [{
                     "link_id": "friend_tui_1",
@@ -126,7 +147,13 @@ impl TuiBus for MockBus {
             }),
             "a2ui.action" => serde_json::json!({"accepted": true}),
             "grant.approve" | "grant.deny" => serde_json::json!({"ok": true}),
-            "message.submit" => serde_json::json!({"submitted": true}),
+            "conversation.send" => serde_json::json!({
+                "message_id": "msg_sent",
+                "client_message_id": "client_sent",
+                "conversation_id": conversation,
+                "delivery_state": "submitted",
+                "deliveries": []
+            }),
             "message.receive" => serde_json::json!({
                 "entries": [],
                 "decrypted_messages": [{
@@ -259,7 +286,6 @@ fn mock_approvals() -> serde_json::Value {
 async fn renders_conversations_messages_contacts_and_groups() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
 
     let mut terminal = Terminal::new(TestBackend::new(100, 28))
@@ -329,7 +355,6 @@ async fn conversations_panel_uses_real_projection_over_synthetic_default() -> Re
         ..MockBus::default()
     };
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
 
     assert_eq!(app.state.conversations.len(), 2);
@@ -345,6 +370,7 @@ async fn conversations_panel_uses_real_projection_over_synthetic_default() -> Re
             TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing read".to_owned()))
         })?;
     assert_eq!(read.body["conversation_id"], "conv_real_1");
+    assert_eq!(read.body["read_model"], true);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 28))
         .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
@@ -361,7 +387,6 @@ async fn conversations_panel_uses_real_projection_over_synthetic_default() -> Re
 async fn contact_panel_loads_safety_number_and_marks_verified() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Contacts;
 
@@ -380,7 +405,6 @@ async fn contacts_panel_adds_contact_with_commitments_and_switches_account() -> 
 {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Contacts;
 
@@ -417,7 +441,6 @@ async fn contacts_panel_adds_contact_with_commitments_and_switches_account() -> 
 async fn message_panel_surfaces_receipts_and_delete_actions() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.set_local_device_id("alice_device_tui");
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
@@ -456,7 +479,6 @@ async fn message_panel_surfaces_receipts_and_delete_actions() -> Result<(), TuiE
 async fn group_panel_surfaces_governance_actions() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
 
     app.remove_group_member(&mut bus, "bob", "alice").await?;
@@ -476,7 +498,6 @@ async fn group_panel_surfaces_governance_actions() -> Result<(), TuiError> {
 async fn contacts_panel_surfaces_device_restore_and_revoke() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
 
     app.refresh_devices(&mut bus).await?;
     app.activate_device(&mut bus, "device_tui_alice_b", "target_tui_alice_b", [0x22; 32], Some(2))
@@ -511,7 +532,6 @@ async fn contacts_panel_surfaces_device_restore_and_revoke() -> Result<(), TuiEr
 async fn contacts_panel_surfaces_own_device_sync_actions() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
 
     let envelope = serde_json::json!({
         "schema": "ramflux.sdk.own_device_sync.v1",
@@ -544,7 +564,6 @@ async fn contacts_panel_surfaces_own_device_sync_actions() -> Result<(), TuiErro
 async fn enter_in_message_panel_submits_plaintext_over_bus() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
     app.handle_input(&mut bus, TuiInput::EnterCompose).await?;
@@ -554,20 +573,15 @@ async fn enter_in_message_panel_submits_plaintext_over_bus() -> Result<(), TuiEr
     app.handle_input(&mut bus, TuiInput::Enter).await?;
 
     let submit =
-        bus.requests.iter().find(|request| request.method == "message.submit").ok_or_else(
-            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing submit".to_owned())),
+        bus.requests.iter().find(|request| request.method == "conversation.send").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing send".to_owned())),
         )?;
-    assert_eq!(submit.sdk_api, "message");
-    assert_eq!(submit.body["recipient_device_id"], serde_json::Value::Null);
-    let plaintext =
-        submit.body.get("plaintext_body_base64").and_then(serde_json::Value::as_str).ok_or_else(
-            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing plaintext".to_owned())),
-        )?;
-    assert_eq!(
-        ramflux_protocol::decode_base64url(plaintext)
-            .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?,
-        b"typed via tui"
-    );
+    assert_eq!(submit.sdk_api, "conversation");
+    assert_eq!(submit.body["text"], "typed via tui");
+    assert_eq!(submit.body["media"], serde_json::json!([]));
+    assert!(submit.body.get("plaintext_body_base64").is_none());
+    assert!(submit.body.get("attachments").is_none());
+    assert!(submit.operation_id.as_ref().is_some_and(|id| !id.is_empty() && id.len() <= 256));
     assert!(app.state.messages.iter().any(|message| message.body == "typed via tui"));
     Ok(())
 }
@@ -576,7 +590,6 @@ async fn enter_in_message_panel_submits_plaintext_over_bus() -> Result<(), TuiEr
 async fn compose_mode_submits_shortcut_characters_as_plaintext() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
 
@@ -592,18 +605,11 @@ async fn compose_mode_submits_shortcut_characters_as_plaintext() -> Result<(), T
     assert!(!bus.requests.iter().any(|request| request.method == "message.receipt.delivered"));
     assert!(!bus.requests.iter().any(|request| request.method == "message.receipt.read"));
     let submit =
-        bus.requests.iter().find(|request| request.method == "message.submit").ok_or_else(
-            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing submit".to_owned())),
+        bus.requests.iter().find(|request| request.method == "conversation.send").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing send".to_owned())),
         )?;
-    let plaintext =
-        submit.body.get("plaintext_body_base64").and_then(serde_json::Value::as_str).ok_or_else(
-            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing plaintext".to_owned())),
-        )?;
-    assert_eq!(
-        ramflux_protocol::decode_base64url(plaintext)
-            .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?,
-        b"relax xray lol"
-    );
+    assert_eq!(submit.body["text"], "relax xray lol");
+    assert!(submit.body.get("plaintext_body_base64").is_none());
     Ok(())
 }
 
@@ -611,7 +617,6 @@ async fn compose_mode_submits_shortcut_characters_as_plaintext() -> Result<(), T
 async fn compose_mode_keeps_keyboard_mapped_q_and_i_as_plaintext() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
 
@@ -635,7 +640,6 @@ async fn compose_mode_keeps_keyboard_mapped_q_and_i_as_plaintext() -> Result<(),
 async fn compose_mode_on_objects_preserves_command_letters() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Objects;
 
@@ -654,7 +658,6 @@ async fn compose_mode_on_objects_preserves_command_letters() -> Result<(), TuiEr
 async fn compose_enter_dispatches_object_command_and_resets_mode() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Objects;
 
@@ -671,7 +674,9 @@ async fn compose_enter_dispatches_object_command_and_resets_mode() -> Result<(),
         request.method == "object.transfer.status" && request.body["object_id"] == "object_resource"
     }));
     // The message submit path must not fire for the Objects panel.
-    assert!(!bus.requests.iter().any(|request| request.method == "message.submit"));
+    assert!(!bus.requests.iter().any(|request| {
+        request.method == "message.submit" || request.method == "conversation.send"
+    }));
     Ok(())
 }
 
@@ -679,7 +684,6 @@ async fn compose_enter_dispatches_object_command_and_resets_mode() -> Result<(),
 async fn input_title_reflects_compose_mode() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
 
@@ -701,7 +705,6 @@ async fn input_title_reflects_compose_mode() -> Result<(), TuiError> {
 #[test]
 fn gateway_deliver_event_refreshes_message_view() -> Result<(), TuiError> {
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.state.conversations.push(ConversationRow {
         id: DEFAULT_CONVERSATION_ID.to_owned(),
         title: "Default DM".to_owned(),
@@ -738,8 +741,8 @@ fn gateway_deliver_event_refreshes_message_view() -> Result<(), TuiError> {
     };
 
     app.handle_bus_event(&event)?;
-    assert!(app.state.messages.iter().any(|message| message.id == "env_tui_event_1"));
-    assert_eq!(app.state.conversations[0].unread, 1);
+    assert_eq!(app.state.messages, Vec::new());
+    assert_eq!(app.state.conversations[0].unread, 0);
     Ok(())
 }
 
@@ -748,7 +751,6 @@ async fn message_submit_uses_selected_conversation_recipient_for_bootstrap() -> 
 {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.state.conversations.push(ConversationRow {
         id: "conv_bootstrap".to_owned(),
         title: "Bob".to_owned(),
@@ -766,14 +768,15 @@ async fn message_submit_uses_selected_conversation_recipient_for_bootstrap() -> 
     app.handle_input(&mut bus, TuiInput::Enter).await?;
 
     let submit =
-        bus.requests.iter().find(|request| request.method == "message.submit").ok_or_else(
-            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing submit".to_owned())),
+        bus.requests.iter().find(|request| request.method == "conversation.send").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing send".to_owned())),
         )?;
     assert_eq!(submit.body["conversation_id"], "conv_bootstrap");
-    assert_eq!(submit.body["source_principal_id"], "principal_tui_alice");
-    assert_eq!(submit.body["sender_id"], "device_tui_alice");
-    assert_eq!(submit.body["recipient_device_id"], "bob_device_tui");
-    assert_eq!(submit.body["target_delivery_id"], "target_tui_bob");
+    assert_eq!(submit.body["text"], "hello bob");
+    assert_eq!(submit.body["media"], serde_json::json!([]));
+    assert!(submit.operation_id.as_ref().is_some_and(|id| !id.is_empty()));
+    assert!(submit.body.get("source_principal_id").is_none());
+    assert!(submit.body.get("plaintext_body_base64").is_none());
     Ok(())
 }
 
@@ -781,7 +784,6 @@ async fn message_submit_uses_selected_conversation_recipient_for_bootstrap() -> 
 async fn message_panel_submits_queued_attachment_over_bus() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Messages;
     app.queue_attachment_bytes_for_relay(
@@ -797,24 +799,20 @@ async fn message_panel_submits_queued_attachment_over_bus() -> Result<(), TuiErr
     app.handle_input(&mut bus, TuiInput::Enter).await?;
 
     let submit =
-        bus.requests.iter().rfind(|request| request.method == "message.submit").ok_or_else(
-            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing submit".to_owned())),
+        bus.requests.iter().rfind(|request| request.method == "conversation.send").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing send".to_owned())),
         )?;
-    let attachments = submit.body["attachments"].as_array().ok_or_else(|| {
-        TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing attachments".to_owned()))
-    })?;
-    assert_eq!(attachments.len(), 1);
-    assert_eq!(attachments[0]["object_id"], "object_tui_attach_send");
-    assert_eq!(attachments[0]["relay_endpoint"], "http://relay.test");
-    assert_eq!(attachments[0]["relay_service_key_base64"], "relay_key_tui");
-    assert_eq!(
-        attachments[0]["plaintext_base64"].as_str(),
-        Some(ramflux_protocol::encode_base64url(b"secret attachment bytes").as_str())
-    );
-    assert_eq!(app.state.pending_attachments.len(), 0);
-    assert!(app.state.messages.iter().any(|message| {
-        message.attachments.iter().any(|item| item.object_id == "object_tui_attach_send")
-    }));
+    assert_eq!(submit.body["text"], "body with attachment");
+    assert_eq!(submit.body["media"], serde_json::json!([]));
+    assert!(submit.body.get("attachments").is_none());
+    assert!(submit.body.get("plaintext_body_base64").is_none());
+    let encoded = serde_json::to_string(&submit.body)
+        .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
+    assert!(!encoded.contains("secret attachment bytes"));
+    assert!(!encoded.contains(&ramflux_protocol::encode_base64url(b"secret attachment bytes")));
+    assert_eq!(app.state.pending_attachments.len(), 1);
+    assert!(app.state.messages.iter().all(|message| message.attachments.is_empty()));
+    assert!(app.state.status_message.as_deref().is_some_and(|status| status.contains("not sent")));
     Ok(())
 }
 
@@ -822,30 +820,22 @@ async fn message_panel_submits_queued_attachment_over_bus() -> Result<(), TuiErr
 async fn message_receive_auto_fetches_and_renders_attachment() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("bob_account");
-    app.set_legacy_poll(true);
     app.receive_messages_with_attachments(&mut bus).await?;
 
-    let receive =
-        bus.requests.iter().find(|request| request.method == "message.receive").ok_or_else(
-            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing receive".to_owned())),
-        )?;
-    assert_eq!(receive.body["auto_fetch_attachments"], true);
+    assert!(!bus.requests.iter().any(|request| request.method == "message.receive"));
+    let read =
+        bus.requests.iter().find(|request| request.method == "message.read").ok_or_else(|| {
+            TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing read".to_owned()))
+        })?;
+    assert_eq!(read.body["read_model"], true);
     let message =
-        app.state.messages.iter().find(|message| message.id == "env_tui_attach_1").ok_or_else(
-            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing message".to_owned())),
-        )?;
-    assert_eq!(message.body, "attachment received");
-    assert_eq!(message.attachments[0].object_id, "object_tui_attach_1");
-    assert_eq!(message.attachments[0].status, "decrypted");
-
-    app.state.selected_panel = Panel::Messages;
-    let mut terminal = Terminal::new(TestBackend::new(120, 28))
-        .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
-    terminal
-        .draw(|frame| app.render(frame))
-        .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
-    let buffer = buffer_text(&terminal);
-    assert!(buffer.contains("object_tui_attach_1:decrypted"));
+        app.state.messages.iter().find(|message| message.id == "msg_tui_1").ok_or_else(|| {
+            TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing message".to_owned()))
+        })?;
+    assert_eq!(message.body, "hello from bus");
+    assert_eq!(message.attachments, Vec::new());
+    assert!(message.device_sequence.chars().all(|ch| ch.is_ascii_digit()));
+    assert_eq!(message.device_sequence.len(), 20);
     Ok(())
 }
 
@@ -853,7 +843,6 @@ async fn message_receive_auto_fetches_and_renders_attachment() -> Result<(), Tui
 async fn object_panel_renders_transfer_progress_and_resumes() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_object_status(&mut bus, "object_tui_status", Some("upload")).await?;
     if let Some(row) = app.state.object_transfers.first_mut() {
         row.relay_endpoint = Some("http://relay.test".to_owned());
@@ -885,7 +874,6 @@ async fn object_panel_renders_transfer_progress_and_resumes() -> Result<(), TuiE
 #[test]
 fn mcp_approval_event_enters_approval_panel() -> Result<(), TuiError> {
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     let event = ramflux_sdk::LocalBusFrame {
         bus_protocol: "ramflux.local_bus.v1".to_owned(),
         frame_id: "frame_approval_test".to_owned(),
@@ -921,7 +909,6 @@ fn mcp_approval_event_enters_approval_panel() -> Result<(), TuiError> {
 async fn approval_panel_approves_pending_request_over_bus() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Approvals;
     app.handle_input(&mut bus, TuiInput::Char('a')).await?;
@@ -944,7 +931,6 @@ async fn approval_panel_approves_pending_request_over_bus() -> Result<(), TuiErr
 async fn remote_app_approval_is_visible_and_not_locally_approved() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.approvals = parse_approvals(&serde_json::json!({
         "approvals": [{
@@ -1002,10 +988,21 @@ struct FailingBus;
 impl TuiBus for FailingBus {
     async fn request(
         &mut self,
+        account_id: Option<String>,
+        sdk_api: &str,
+        method: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, TuiError> {
+        self.request_operation(account_id, sdk_api, method, body, String::new()).await
+    }
+
+    async fn request_operation(
+        &mut self,
         _account_id: Option<String>,
         _sdk_api: &str,
         _method: &str,
         _body: serde_json::Value,
+        _operation_id: String,
     ) -> Result<serde_json::Value, TuiError> {
         Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("boom".to_owned())))
     }
@@ -1019,7 +1016,6 @@ impl TuiBus for FailingBus {
 async fn dispatch_input_surfaces_error_without_quitting() {
     let mut bus = FailingBus;
     let mut app = TuiApp::new("alice");
-    app.set_legacy_poll(true);
     // Drive an input path that issues a bus request: composing a message on the
     // Messages panel and pressing Enter calls the bus, which fails here.
     app.state.selected_panel = Panel::Messages;
@@ -1040,7 +1036,6 @@ async fn dispatch_input_surfaces_error_without_quitting() {
 async fn empty_message_submit_surfaces_status_instead_of_silent_noop() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.state.selected_panel = Panel::Messages;
     assert_eq!(app.state.input, "");
 
@@ -1048,7 +1043,9 @@ async fn empty_message_submit_surfaces_status_instead_of_silent_noop() -> Result
     app.dispatch_input(&mut bus, TuiInput::Enter).await;
 
     assert_eq!(app.state.status_message.as_deref(), Some("nothing to send"));
-    assert!(!bus.requests.iter().any(|request| request.method == "message.submit"));
+    assert!(!bus.requests.iter().any(|request| {
+        request.method == "message.submit" || request.method == "conversation.send"
+    }));
     Ok(())
 }
 
@@ -1056,7 +1053,6 @@ async fn empty_message_submit_surfaces_status_instead_of_silent_noop() -> Result
 async fn decide_approval_with_no_selection_surfaces_status() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.state.selected_panel = Panel::Approvals;
     assert_eq!(app.state.approvals, Vec::<state::ApprovalRow>::new());
 
@@ -1071,7 +1067,6 @@ async fn decide_approval_with_no_selection_surfaces_status() -> Result<(), TuiEr
 async fn verify_refuses_blind_then_allows_after_safety_number() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
-    app.set_legacy_poll(true);
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Contacts;
     assert_eq!(app.state.contacts[0].safety_number, Vec::<String>::new());
@@ -1100,7 +1095,6 @@ async fn verify_refuses_blind_then_allows_after_safety_number() -> Result<(), Tu
 async fn decrypted_message_replaces_delivery_placeholder() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("bob_account");
-    app.set_legacy_poll(true);
     app.state.conversations.push(ConversationRow {
         id: DEFAULT_CONVERSATION_ID.to_owned(),
         title: "Default DM".to_owned(),
@@ -1138,23 +1132,16 @@ async fn decrypted_message_replaces_delivery_placeholder() -> Result<(), TuiErro
         error: None,
     };
     app.handle_bus_event(&event)?;
-    assert_eq!(app.state.conversations[0].unread, 1);
-    assert!(app.state.messages.iter().any(|message| message.body == "[new encrypted message]"));
+    assert_eq!(app.state.conversations[0].unread, 0);
+    assert_eq!(app.state.messages, Vec::new());
 
-    // The decrypt fetch returns a row keyed by a different message_id; the stale
-    // placeholder must be dropped rather than left lingering beside the real copy.
     app.receive_messages_with_attachments(&mut bus).await?;
 
-    assert!(
-        !app.state.messages.iter().any(|message| message.body == "[new encrypted message]"),
-        "placeholder lingered after decrypt: {:?}",
-        app.state.messages
-    );
+    assert!(!bus.requests.iter().any(|request| request.method == "message.receive"));
     assert_eq!(app.state.messages.len(), 1);
-    assert_eq!(app.state.messages[0].id, "env_tui_attach_1");
-    assert_eq!(app.state.messages[0].body, "attachment received");
-    // The placeholder's unread bump is undone so the decrypted copy is not double-counted.
-    assert_eq!(app.state.conversations[0].unread, 1);
+    assert_eq!(app.state.messages[0].id, "msg_tui_1");
+    assert_eq!(app.state.messages[0].body, "hello from bus");
+    assert!(app.state.messages.iter().all(|message| message.body != "[new encrypted message]"));
     Ok(())
 }
 
@@ -1163,18 +1150,68 @@ fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
 }
 
 #[test]
-fn task_messages_render_their_text_fallback_and_unverified_kind_marker()
+fn task_messages_render_read_model_text_without_actor_kind_marker()
 -> Result<(), Box<dyn std::error::Error>> {
-    let response = serde_json::json!({"messages":[{"message_id":"task-message","sender_id":"agent-device","content_type":"task","actor_kind_verified":false,"body_utf8":"Task done (actor kind unverified)"}]});
+    let sniffed = serde_json::json!({"messages":[{"message_id":"task-message","sender_id":"agent-device","content_type":"task","actor_kind_verified":false,"body_utf8":"Task done (actor kind unverified)"}]});
+    assert!(crate::read_model::parse_page(&sniffed).is_err());
+    let page = crate::read_model::sample_page("conv", "task-message", "Task done");
     let mut app = TuiApp::new("human");
     app.state.selected_panel = Panel::Messages;
-    app.state.messages = crate::parsing::parse_messages(&response);
+    app.state.messages = crate::read_model::parse_page(&page)?.messages;
     assert_eq!(app.state.messages.len(), 1);
     let mut terminal = Terminal::new(TestBackend::new(120, 28))?;
     terminal.draw(|frame| app.render(frame))?;
     let rendered = buffer_text(&terminal);
     assert!(rendered.contains("Task done"));
-    assert!(rendered.contains("actor kind unverified"));
+    assert!(!rendered.contains("actor kind unverified"));
+    Ok(())
+}
+
+#[test]
+fn target_not_found_removes_only_that_row() {
+    let mut app = TuiApp::new("alice");
+    app.state.messages.push(MessageRow::local_send("keep".to_owned(), "stay".to_owned()));
+    app.state.messages.push(MessageRow::local_send("drop".to_owned(), "gone".to_owned()));
+    app.apply_typed_refusal(
+        ramflux_sdk::bindings::GeneratedErrorCode::TargetNotFound.name(),
+        Some("drop"),
+    );
+    assert_eq!(app.state.messages.len(), 1);
+    assert_eq!(app.state.messages[0].id, "keep");
+    assert_eq!(app.state.messages[0].body, "stay");
+}
+
+#[test]
+fn tombstone_change_replaces_the_cached_body() -> Result<(), TuiError> {
+    let mut app = TuiApp::new("alice");
+    let page = crate::read_model::sample_page("conv", "msg", "hello");
+    let parsed = crate::read_model::parse_page(&page)?;
+    let original = parsed
+        .messages
+        .into_iter()
+        .next()
+        .ok_or_else(|| TuiError::ReadModel("missing sample row".to_owned()))?;
+    app.apply_read_model_row(original);
+    let mut tombstone = crate::read_model::sample_message("msg", "conv", "hello");
+    tombstone["state"] = serde_json::json!("tombstone");
+    tombstone["kind"] = serde_json::json!("tombstone");
+    tombstone["erasure"] = serde_json::json!({"scope": "local", "tombstone_id": "tomb"});
+    let page = serde_json::json!({
+        "schema": crate::read_model::READ_MODEL_SCHEMA,
+        "conversation_id": "conv",
+        "messages": [tombstone],
+        "snapshot_sequence": 12
+    });
+    let replacement = crate::read_model::parse_page(&page)?
+        .messages
+        .into_iter()
+        .next()
+        .ok_or_else(|| TuiError::ReadModel("missing tombstone row".to_owned()))?;
+    app.apply_read_model_row(replacement);
+    assert_eq!(app.state.messages.len(), 1);
+    assert_eq!(app.state.messages[0].body, "");
+    assert_eq!(app.state.messages[0].state, "tombstone");
+    assert_eq!(app.state.messages[0].attachments, Vec::new());
     Ok(())
 }
 

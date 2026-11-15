@@ -6,6 +6,7 @@ mod app;
 mod bus;
 mod error;
 mod parsing;
+mod read_model;
 mod state;
 mod stream;
 #[cfg(test)]
@@ -39,4 +40,3 @@ pub fn key_to_input(code: crossterm::event::KeyCode) -> Option<TuiInput> {
 /// Default account used by the first private TUI milestone.
 pub const DEFAULT_ACCOUNT_ID: &str = "default";
 pub(crate) const DEFAULT_CONVERSATION_ID: &str = "conv_tui_default";
-pub(crate) const DEFAULT_TARGET_DELIVERY_ID: &str = "target_tui_default";

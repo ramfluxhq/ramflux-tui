@@ -82,7 +82,7 @@ pub struct ConversationRow {
     pub target_delivery_id: Option<String>,
 }
 
-/// Message row.
+/// Message row projected from the generation-1 read model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MessageRow {
     pub id: String,
@@ -91,6 +91,36 @@ pub struct MessageRow {
     pub status: String,
     pub attachments: Vec<AttachmentRow>,
     pub receipts: Vec<MessageReceiptRow>,
+    /// Zero-padded 20-digit device sequence. Empty only for an uncommitted local send.
+    pub device_sequence: String,
+    /// Hybrid-clock milliseconds. Always below 2^53 for a parsed row.
+    pub hlc_ms: u64,
+    /// Hybrid-clock logical counter.
+    pub hlc_logical: u64,
+    /// `content`, `unsupported`, or `tombstone`.
+    pub state: String,
+    /// Durable change cursor of this row.
+    pub journal_sequence: u64,
+}
+
+impl MessageRow {
+    /// Optimistic row for a send that has not yet been read back from the store.
+    #[must_use]
+    pub(crate) fn local_send(id: String, body: String) -> Self {
+        Self {
+            id,
+            sender: "me".to_owned(),
+            body,
+            status: "sending".to_owned(),
+            attachments: Vec::new(),
+            receipts: Vec::new(),
+            device_sequence: String::new(),
+            hlc_ms: 0,
+            hlc_logical: 0,
+            state: "content".to_owned(),
+            journal_sequence: 0,
+        }
+    }
 }
 
 /// Attachment row shown inside the message/object surfaces.

@@ -23,9 +23,6 @@ struct Cli {
     socket: PathBuf,
     #[arg(long, default_value = ramflux_cli_pro::DEFAULT_ACCOUNT_ID)]
     account: String,
-    /// Keep legacy receive polling for compatibility with older daemons.
-    #[arg(long)]
-    legacy_poll: bool,
 }
 
 #[tokio::main]
@@ -40,12 +37,10 @@ async fn run() -> Result<(), TuiError> {
     let cli = Cli::parse();
     let mut bus = SdkLocalBus::connect(&cli.socket).await?;
     let mut app = TuiApp::new(cli.account);
-    app.set_legacy_poll(cli.legacy_poll);
     app.refresh_all(&mut bus).await?;
 
     let mut terminal = setup_terminal()?;
-    let result =
-        run_terminal_loop(&mut terminal, &mut app, &mut bus, &cli.socket, cli.legacy_poll).await;
+    let result = run_terminal_loop(&mut terminal, &mut app, &mut bus, &cli.socket).await;
     restore_terminal(&mut terminal)?;
     result
 }
@@ -55,16 +50,8 @@ async fn run_terminal_loop(
     app: &mut TuiApp,
     bus: &mut SdkLocalBus,
     socket: &std::path::Path,
-    legacy_poll: bool,
 ) -> Result<(), TuiError> {
-    let mut next_legacy_poll = tokio::time::Instant::now() + Duration::from_secs(1);
     while !app.should_quit() {
-        if legacy_poll && tokio::time::Instant::now() >= next_legacy_poll {
-            if let Err(error) = app.receive_messages_with_attachments(bus).await {
-                app.state.status_message = Some(format!("receive failed: {error}"));
-            }
-            next_legacy_poll = tokio::time::Instant::now() + Duration::from_secs(1);
-        }
         match tokio::time::timeout(Duration::from_millis(1), bus.next_event()).await {
             Ok(Ok(event)) => {
                 if let Err(error) = app.apply_stream_event(bus, &event).await {
