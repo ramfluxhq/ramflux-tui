@@ -22,31 +22,8 @@ const HLC_LOGICAL_LIMIT: u64 = 1 << 16;
 /// Largest row count accepted from one response.
 const MAX_ROWS: usize = 100;
 
-const PAGE_FIELDS: &[&str] =
-    &["schema", "conversation_id", "messages", "next_before", "snapshot_sequence"];
-const CHANGE_FIELDS: &[&str] =
-    &["schema", "conversation_id", "changes", "next_after", "more", "snapshot_sequence"];
-const VIEW_FIELDS: &[&str] = &[
-    "id",
-    "conversation_id",
-    "author",
-    "device_sequence",
-    "hlc_ms",
-    "hlc_logical",
-    "group_id",
-    "journal_sequence",
-    "is_own",
-    "state",
-    "kind",
-    "text",
-    "content",
-    "unsupported",
-    "erasure",
-    "revision",
-    "edited",
-    "reactions",
-    "receipts",
-];
+/// Retired generation-0 names. Additive fields are ignored.
+const RETIRED_FIELDS: &[&str] = &["hlc", "body_utf8"];
 
 type Object = Map<String, Value>;
 
@@ -99,10 +76,10 @@ pub(crate) fn generated_code(error: &TuiError) -> Option<&str> {
 /// Parses a rendered page.
 ///
 /// # Errors
-/// Rejects a missing schema, an unknown field, a numeric device sequence, or a combined `hlc`.
+/// Rejects a missing schema, a retired field, a numeric device sequence, or a combined `hlc`.
 pub(crate) fn parse_page(value: &Value) -> Result<ReadModelPage, TuiError> {
     let map = expect_object(value, "page")?;
-    reject_unknown(map, PAGE_FIELDS)?;
+    reject_retired(map)?;
     require_schema(&req_string(map, "schema")?)?;
     let conversation_id = req_string(map, "conversation_id")?;
     let messages = parse_rows(field(map, "messages")?, "page")?;
@@ -120,7 +97,7 @@ pub(crate) fn parse_page(value: &Value) -> Result<ReadModelPage, TuiError> {
 /// Rejects the same malformed rows as [`parse_page`].
 pub(crate) fn parse_changes(value: &Value) -> Result<ReadModelChanges, TuiError> {
     let map = expect_object(value, "changes")?;
-    reject_unknown(map, CHANGE_FIELDS)?;
+    reject_retired(map)?;
     require_schema(&req_string(map, "schema")?)?;
     let conversation_id = req_string(map, "conversation_id")?;
     let changes = parse_rows(field(map, "changes")?, "change batch")?;
@@ -166,13 +143,25 @@ fn expect_object<'a>(value: &'a Value, what: &str) -> Result<&'a Object, TuiErro
     value.as_object().ok_or_else(|| invalid(format!("{what} must be an object")))
 }
 
-fn reject_unknown(map: &Object, allowed: &[&str]) -> Result<(), TuiError> {
-    for key in map.keys() {
-        if !allowed.iter().any(|name| *name == key) {
-            return Err(invalid(format!("unknown field {key}")));
+fn reject_retired(map: &Object) -> Result<(), TuiError> {
+    for key in RETIRED_FIELDS {
+        if map.contains_key(*key) {
+            return Err(invalid(format!("retired field {key}")));
         }
     }
     Ok(())
+}
+
+/// Parses one `MessageDetail`.
+///
+/// # Errors
+/// Rejects the same malformed message as [`parse_page`].
+pub(crate) fn parse_detail(value: &Value) -> Result<MessageRow, TuiError> {
+    let map = expect_object(value, "detail")?;
+    reject_retired(map)?;
+    require_schema(&req_string(map, "schema")?)?;
+    req_u64(map, "snapshot_sequence")?;
+    parse_row(field(map, "message")?)
 }
 
 fn field<'a>(map: &'a Object, key: &str) -> Result<&'a Value, TuiError> {
@@ -239,7 +228,7 @@ fn parse_rows(value: &Value, what: &str) -> Result<Vec<MessageRow>, TuiError> {
 
 fn parse_row(value: &Value) -> Result<MessageRow, TuiError> {
     let map = expect_object(value, "message")?;
-    reject_unknown(map, VIEW_FIELDS)?;
+    reject_retired(map)?;
     let parts = ViewParts {
         id: req_string(map, "id")?,
         conversation_id: req_string(map, "conversation_id")?,
@@ -283,7 +272,6 @@ fn parse_author_anchor(map: &Object) -> Result<Option<String>, TuiError> {
     let Some(author) = opt_object(map, "author")? else {
         return Ok(None);
     };
-    reject_unknown(author, &["account_anchor", "device_id", "device_epoch"])?;
     let anchor = req_string(author, "account_anchor")?;
     let _device_id = req_string(author, "device_id")?;
     let _device_epoch = req_u64(author, "device_epoch")?;
@@ -310,7 +298,6 @@ fn validate_unsupported(map: &Object) -> Result<(), TuiError> {
     let Some(placeholder) = opt_object(map, "unsupported")? else {
         return Ok(());
     };
-    reject_unknown(placeholder, &["layer", "kind", "raw_length", "reason"])?;
     let _layer = req_u32(placeholder, "layer")?;
     let _kind = req_u32(placeholder, "kind")?;
     let _raw_length = req_u32(placeholder, "raw_length")?;
@@ -322,7 +309,6 @@ fn parse_erasure_scope(map: &Object) -> Result<Option<String>, TuiError> {
     let Some(erasure) = opt_object(map, "erasure")? else {
         return Ok(None);
     };
-    reject_unknown(erasure, &["scope", "tombstone_id"])?;
     let scope = req_string(erasure, "scope")?;
     let _tombstone_id = req_string(erasure, "tombstone_id")?;
     Ok(Some(scope))
@@ -337,7 +323,6 @@ fn validate_reactions(map: &Object) -> Result<(), TuiError> {
     };
     for item in items {
         let reaction = expect_object(item, "reaction")?;
-        reject_unknown(reaction, &["token", "count"])?;
         let _token = req_string(reaction, "token")?;
         let _count = req_u32(reaction, "count")?;
     }
@@ -360,10 +345,6 @@ fn parse_receipts(map: &Object) -> Result<Vec<MessageReceiptRow>, TuiError> {
 
 fn parse_receipt(value: &Value) -> Result<MessageReceiptRow, TuiError> {
     let receipt = expect_object(value, "receipt")?;
-    reject_unknown(
-        receipt,
-        &["device_id", "principal_commitment", "state", "delivered_at", "read_at"],
-    )?;
     let device_id = req_string(receipt, "device_id")?;
     let state = req_string(receipt, "state")?;
     let _principal = opt_string(receipt, "principal_commitment")?;
@@ -507,6 +488,15 @@ pub(crate) fn sample_changes(conversation_id: &str, next_after: u64) -> Value {
 }
 
 #[cfg(test)]
+pub(crate) fn sample_detail(conversation_id: &str, id: &str, text: &str) -> Value {
+    serde_json::json!({
+        "schema": READ_MODEL_SCHEMA,
+        "message": sample_message(id, conversation_id, text),
+        "snapshot_sequence": 10
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -632,6 +622,34 @@ mod tests {
             }]
         });
         assert!(parse_page(&sniffed).is_err());
+
+        let mut retired = sample_message("msg", "conv", "hidden");
+        retired["body_utf8"] = serde_json::json!("old body");
+        let page = serde_json::json!({
+            "schema": READ_MODEL_SCHEMA,
+            "conversation_id": "conv",
+            "messages": [retired],
+            "snapshot_sequence": 1
+        });
+        assert!(parse_page(&page).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn tolerates_an_additive_field() -> Result<(), TuiError> {
+        let mut message = sample_message("msg", "conv", "hello");
+        message["receipt_summary"] = serde_json::json!(1);
+        message["author"]["delivery_hint"] = serde_json::json!("later");
+        let page = serde_json::json!({
+            "schema": READ_MODEL_SCHEMA,
+            "conversation_id": "conv",
+            "messages": [message],
+            "snapshot_sequence": 3,
+            "page_hint": true
+        });
+        let parsed = parse_page(&page)?;
+        assert_eq!(parsed.messages[0].body, "hello");
+        assert_eq!(parsed.messages[0].sender, "alice");
         Ok(())
     }
 

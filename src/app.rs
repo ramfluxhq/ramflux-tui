@@ -24,6 +24,8 @@ const RELAY_URL_ENV: &str = "RAMFLUX_TUI_RELAY_URL";
 const RELAY_KEY_ENV: &str = "RAMFLUX_TUI_RELAY_SERVICE_KEY_BASE64";
 /// Upper bound on consecutive change batches so a stuck `more` flag cannot spin.
 const MAX_CHANGE_ROUNDS: u32 = 8;
+/// Newest-first cache. Older rows past this cap are dropped.
+pub(crate) const MAX_CACHED_MESSAGES: usize = 100;
 
 /// TUI application controller.
 #[derive(Clone, Debug, Default)]
@@ -107,8 +109,8 @@ impl TuiApp {
         }
         match input {
             TuiInput::Tab => self.state.selected_panel = self.state.selected_panel.next(),
-            TuiInput::Up => self.move_selection_up(),
-            TuiInput::Down => self.move_selection_down(),
+            TuiInput::Up => self.move_conversation_selection(bus, true).await?,
+            TuiInput::Down => self.move_conversation_selection(bus, false).await?,
             TuiInput::Enter if self.state.selected_panel == Panel::Objects => {
                 self.submit_object_command(bus).await?;
             }
@@ -664,7 +666,7 @@ impl TuiApp {
         }
         if !self.state.pending_attachments.is_empty() {
             self.state.status_message = Some(
-                "queued attachment bytes were not sent; conversation.send accepts media refs only"
+                "queued attachment bytes were not sent; open the object panel to send the file"
                     .to_owned(),
             );
         }
@@ -689,12 +691,14 @@ impl TuiApp {
                 operation_id.clone(),
             )
             .await?;
-        let message_id = response
-            .get("client_message_id")
+        // `message_id` is the event id the read model uses. `client_message_id` is not.
+        if let Some(event_id) = response
+            .get("message_id")
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.is_empty())
-            .map_or(operation_id, str::to_owned);
-        self.push_message(MessageRow::local_send(message_id, body));
+        {
+            self.apply_read_model_row(MessageRow::local_send(event_id.to_owned(), body));
+        }
         Ok(())
     }
 
@@ -1253,8 +1257,8 @@ impl TuiApp {
         let conversation_id = self
             .selected_conversation()
             .map_or_else(|| DEFAULT_CONVERSATION_ID.to_owned(), |row| row.id.clone());
-        bus.request(
-            Some(self.state.account_id.clone()),
+        self.request_keeping_miss(
+            bus,
             "message",
             "message.delete",
             serde_json::json!({
@@ -1290,8 +1294,8 @@ impl TuiApp {
             conversation.and_then(|row| row.target_delivery_id.as_ref()).cloned();
         let receiver_device_id =
             self.state.local_device_id.clone().unwrap_or_else(|| self.state.account_id.clone());
-        bus.request(
-            Some(self.state.account_id.clone()),
+        self.request_keeping_miss(
+            bus,
             "message",
             "message.receipt.delivered",
             serde_json::json!({
@@ -1330,8 +1334,8 @@ impl TuiApp {
             conversation.and_then(|row| row.target_delivery_id.as_ref()).cloned();
         let reader_id =
             self.state.local_device_id.clone().unwrap_or_else(|| self.state.account_id.clone());
-        bus.request(
-            Some(self.state.account_id.clone()),
+        self.request_keeping_miss(
+            bus,
             "message",
             "message.receipt.read",
             serde_json::json!({
@@ -1715,7 +1719,7 @@ impl TuiApp {
             return;
         }
         let last_message =
-            self.state.messages.last().map_or_else(String::new, |message| message.body.clone());
+            self.state.messages.first().map_or_else(String::new, |message| message.body.clone());
         self.state.conversations.push(ConversationRow {
             id: DEFAULT_CONVERSATION_ID.to_owned(),
             title: "Default DM".to_owned(),
@@ -1731,28 +1735,55 @@ impl TuiApp {
         self.state.conversations.get(self.state.selected_conversation)
     }
 
-    fn push_message(&mut self, message: MessageRow) {
-        self.state.messages.push(message);
-        let last_message =
-            self.state.messages.last().map_or_else(String::new, |message| message.body.clone());
-        if let Some(conversation) = self.state.conversations.first_mut() {
-            conversation.last_message = last_message;
-            conversation.unread = conversation.unread.saturating_add(1);
-            "new".clone_into(&mut conversation.status);
+    pub(crate) fn apply_read_model_row(&mut self, message: MessageRow) {
+        let tombstone = message.state == "tombstone";
+        let previous_body =
+            self.state.messages.iter().find(|row| row.id == message.id).map(|row| row.body.clone());
+        if let Some(existing) = self.state.messages.iter_mut().find(|row| row.id == message.id) {
+            *existing = message;
         } else {
-            self.ensure_default_conversation();
+            self.state.messages.insert(0, message);
+            if self.state.messages.len() > MAX_CACHED_MESSAGES {
+                self.state.messages.truncate(MAX_CACHED_MESSAGES);
+            }
+        }
+        if tombstone && let Some(previous_body) = previous_body.filter(|body| !body.is_empty()) {
+            for conversation in &mut self.state.conversations {
+                if conversation.last_message == previous_body {
+                    conversation.last_message.clear();
+                }
+            }
+        }
+        self.sync_conversation_preview();
+    }
+
+    fn sync_conversation_preview(&mut self) {
+        let preview =
+            self.state.messages.first().map(|message| message.body.clone()).unwrap_or_default();
+        let conversation_id = self.selected_conversation().map(|row| row.id.clone());
+        let Some(conversation_id) = conversation_id else {
+            return;
+        };
+        if let Some(conversation) =
+            self.state.conversations.iter_mut().find(|row| row.id == conversation_id)
+        {
+            conversation.last_message = preview;
         }
     }
 
-    pub(crate) fn apply_read_model_row(&mut self, message: MessageRow) {
-        if let Some(existing) = self.state.messages.iter_mut().find(|row| row.id == message.id) {
-            *existing = message;
+    fn remove_requested_message(&mut self, body: &serde_json::Value) {
+        let Some(message_id) = body.get("message_id").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        if message_id.is_empty() {
             return;
         }
-        self.state.messages.insert(0, message);
+        self.state.messages.retain(|row| row.id != message_id);
+        self.sync_conversation_preview();
     }
 
     /// Applies a typed generated refusal. `target_not_found` drops that row and nothing else.
+    #[cfg(test)]
     pub(crate) fn apply_typed_refusal(&mut self, name: &str, message_id: Option<&str>) {
         if name == ramflux_sdk::bindings::GeneratedErrorCode::TargetNotFound.name()
             && let Some(id) = message_id
@@ -1782,6 +1813,7 @@ impl TuiApp {
     pub(crate) async fn follow_message_changes<B: TuiBus + Send>(
         &mut self,
         bus: &mut B,
+        message_hint: Option<&str>,
     ) -> Result<bool, TuiError> {
         if !self.stream_cursors.contains_key(&self.state.account_id) {
             self.resync_messages(bus).await?;
@@ -1807,7 +1839,9 @@ impl TuiApp {
                 .await
             {
                 Ok(value) => value,
-                Err(error) => return self.handle_change_error(bus, &body, error).await,
+                Err(error) => {
+                    return self.handle_change_error(bus, &body, message_hint, error).await;
+                }
             };
             let batch = read_model::parse_changes(&response)?;
             if batch.conversation_id != conversation_id {
@@ -1830,6 +1864,7 @@ impl TuiApp {
         &mut self,
         bus: &mut B,
         body: &serde_json::Value,
+        message_hint: Option<&str>,
         error: TuiError,
     ) -> Result<bool, TuiError> {
         let name = generated_code(&error).map(str::to_owned);
@@ -1840,18 +1875,99 @@ impl TuiApp {
             self.resync_messages(bus).await?;
             return Ok(true);
         }
-        let stops = [
-            ramflux_sdk::bindings::GeneratedErrorCode::TargetNotFound.name(),
-            ramflux_sdk::bindings::GeneratedErrorCode::SchemaResetRequired.name(),
-            ramflux_sdk::bindings::GeneratedErrorCode::Internal.name(),
-            ramflux_sdk::bindings::GeneratedErrorCode::PayloadTooLarge.name(),
-        ];
-        if stops.iter().any(|item| *item == name) {
-            let message_id = body.get("message_id").and_then(serde_json::Value::as_str);
-            self.apply_typed_refusal(&name, message_id);
-            return Ok(false);
+        if name == ramflux_sdk::bindings::GeneratedErrorCode::PayloadTooLarge.name() {
+            self.read_single_message(bus, body, message_hint).await?;
+        } else if name == ramflux_sdk::bindings::GeneratedErrorCode::TargetNotFound.name() {
+            self.remove_requested_message(body);
         }
+        self.state.status_message = Some(name);
         Err(error)
+    }
+
+    async fn read_single_message<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+        body: &serde_json::Value,
+        message_hint: Option<&str>,
+    ) -> Result<(), TuiError> {
+        let message_id = body
+            .get("message_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or_else(|| message_hint.filter(|value| !value.is_empty()).map(str::to_owned));
+        let Some(message_id) = message_id else {
+            return Ok(());
+        };
+        let conversation_id = body
+            .get("conversation_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map_or_else(
+                || {
+                    self.selected_conversation()
+                        .map_or_else(|| DEFAULT_CONVERSATION_ID.to_owned(), |row| row.id.clone())
+                },
+                str::to_owned,
+            );
+        let response = bus
+            .request(
+                Some(self.state.account_id.clone()),
+                "message",
+                "message.read",
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "message_id": message_id
+                }),
+            )
+            .await?;
+        self.apply_read_model_row(read_model::parse_detail(&response)?);
+        Ok(())
+    }
+
+    async fn request_keeping_miss<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+        sdk_api: &str,
+        method: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, TuiError> {
+        match bus.request(Some(self.state.account_id.clone()), sdk_api, method, body.clone()).await
+        {
+            Ok(value) => Ok(value),
+            Err(error)
+                if generated_code(&error)
+                    == Some(ramflux_sdk::bindings::GeneratedErrorCode::TargetNotFound.name()) =>
+            {
+                self.remove_requested_message(&body);
+                self.state.status_message = Some(
+                    ramflux_sdk::bindings::GeneratedErrorCode::TargetNotFound.name().to_owned(),
+                );
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn move_conversation_selection<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+        upward: bool,
+    ) -> Result<(), TuiError> {
+        let previous = self.selected_conversation().map(|row| row.id.clone());
+        if upward {
+            self.move_selection_up();
+        } else {
+            self.move_selection_down();
+        }
+        if self.state.selected_panel != Panel::Conversations {
+            return Ok(());
+        }
+        let current = self.selected_conversation().map(|row| row.id.clone());
+        if current == previous {
+            return Ok(());
+        }
+        self.refresh_messages(bus).await
     }
 
     fn apply_transfer_response(&mut self, response: &serde_json::Value) {

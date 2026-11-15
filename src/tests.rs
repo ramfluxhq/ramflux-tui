@@ -21,6 +21,10 @@ struct MockBus {
     /// synthetic Default DM fallback still applies.
     conversation_list: serde_json::Value,
     revoke_response: Option<serde_json::Value>,
+    /// `(method, generated code)` refused once the request has been recorded.
+    typed_refusal: Option<(String, String)>,
+    /// `conversation.send` omits `message_id` and keeps `client_message_id`.
+    omit_send_event_id: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -60,6 +64,15 @@ impl TuiBus for MockBus {
             body: body.clone(),
             operation_id: if operation_id.is_empty() { None } else { Some(operation_id) },
         });
+        if let Some((refused_method, code)) = self.typed_refusal.clone()
+            && refused_method == method
+        {
+            return Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBusRefused {
+                code,
+                message: "refused".to_owned(),
+                body: Box::new(serde_json::json!({})),
+            }));
+        }
         let conversation = body
             .get("conversation_id")
             .and_then(serde_json::Value::as_str)
@@ -147,13 +160,18 @@ impl TuiBus for MockBus {
             }),
             "a2ui.action" => serde_json::json!({"accepted": true}),
             "grant.approve" | "grant.deny" => serde_json::json!({"ok": true}),
-            "conversation.send" => serde_json::json!({
-                "message_id": "msg_sent",
-                "client_message_id": "client_sent",
-                "conversation_id": conversation,
-                "delivery_state": "submitted",
-                "deliveries": []
-            }),
+            "conversation.send" => {
+                let mut response = serde_json::json!({
+                    "client_message_id": "client_sent",
+                    "conversation_id": conversation,
+                    "delivery_state": "submitted",
+                    "deliveries": []
+                });
+                if !self.omit_send_event_id {
+                    response["message_id"] = serde_json::json!("msg_sent");
+                }
+                response
+            }
             "message.receive" => serde_json::json!({
                 "entries": [],
                 "decrypted_messages": [{
@@ -583,6 +601,21 @@ async fn enter_in_message_panel_submits_plaintext_over_bus() -> Result<(), TuiEr
     assert!(submit.body.get("attachments").is_none());
     assert!(submit.operation_id.as_ref().is_some_and(|id| !id.is_empty() && id.len() <= 256));
     assert!(app.state.messages.iter().any(|message| message.body == "typed via tui"));
+    assert_eq!(app.state.messages.first().map(|message| message.id.as_str()), Some("msg_sent"));
+    assert!(app.state.messages.iter().all(|message| message.id != "client_sent"));
+    let stored = crate::read_model::parse_detail(&crate::read_model::sample_detail(
+        crate::DEFAULT_CONVERSATION_ID,
+        "msg_sent",
+        "from the store",
+    ))?;
+    app.apply_read_model_row(stored);
+    let reconciled = app.state.messages.iter().filter(|message| message.id == "msg_sent").count();
+    assert_eq!(reconciled, 1);
+    assert_eq!(
+        app.state.messages.first().map(|message| message.body.as_str()),
+        Some("from the store")
+    );
+    assert_eq!(app.state.messages.first().map(|message| message.status.as_str()), Some("content"));
     Ok(())
 }
 
@@ -812,7 +845,10 @@ async fn message_panel_submits_queued_attachment_over_bus() -> Result<(), TuiErr
     assert!(!encoded.contains(&ramflux_protocol::encode_base64url(b"secret attachment bytes")));
     assert_eq!(app.state.pending_attachments.len(), 1);
     assert!(app.state.messages.iter().all(|message| message.attachments.is_empty()));
-    assert!(app.state.status_message.as_deref().is_some_and(|status| status.contains("not sent")));
+    assert_eq!(
+        app.state.status_message.as_deref(),
+        Some("queued attachment bytes were not sent; open the object panel to send the file")
+    );
     Ok(())
 }
 
@@ -1207,11 +1243,127 @@ fn tombstone_change_replaces_the_cached_body() -> Result<(), TuiError> {
         .into_iter()
         .next()
         .ok_or_else(|| TuiError::ReadModel("missing tombstone row".to_owned()))?;
+    app.state.conversations.push(ConversationRow {
+        id: "conv".to_owned(),
+        title: "Conv".to_owned(),
+        last_message: "hello".to_owned(),
+        unread: 0,
+        status: "synced".to_owned(),
+        recipient_device_id: None,
+        target_delivery_id: None,
+    });
+    app.state.conversations.push(ConversationRow {
+        id: "other".to_owned(),
+        title: "Other".to_owned(),
+        last_message: "hello".to_owned(),
+        unread: 0,
+        status: "synced".to_owned(),
+        recipient_device_id: None,
+        target_delivery_id: None,
+    });
     app.apply_read_model_row(replacement);
     assert_eq!(app.state.messages.len(), 1);
     assert_eq!(app.state.messages[0].body, "");
     assert_eq!(app.state.messages[0].state, "tombstone");
     assert_eq!(app.state.messages[0].attachments, Vec::new());
+    assert_eq!(app.state.conversations[0].last_message, "");
+    assert_eq!(app.state.conversations[1].last_message, "");
+    Ok(())
+}
+
+#[test]
+fn message_cache_drops_the_oldest_row_past_the_named_cap() {
+    let mut app = TuiApp::new("alice");
+    let cap = crate::app::MAX_CACHED_MESSAGES;
+    for index in 0..cap {
+        app.apply_read_model_row(MessageRow::local_send(
+            format!("old-{index}"),
+            format!("body-{index}"),
+        ));
+    }
+    app.apply_read_model_row(MessageRow::local_send("newest".to_owned(), "fresh".to_owned()));
+    assert_eq!(app.state.messages.len(), cap);
+    assert_eq!(app.state.messages.first().map(|message| message.id.as_str()), Some("newest"));
+    assert!(app.state.messages.iter().all(|message| message.id != "old-0"));
+}
+
+#[tokio::test]
+async fn delete_target_not_found_removes_only_the_requested_id() -> Result<(), TuiError> {
+    let mut bus = MockBus {
+        typed_refusal: Some((
+            "message.delete".to_owned(),
+            ramflux_sdk::bindings::GeneratedErrorCode::TargetNotFound.name().to_owned(),
+        )),
+        ..MockBus::default()
+    };
+    let mut app = TuiApp::new("alice");
+    app.state.messages.push(MessageRow::local_send("keep".to_owned(), "stay".to_owned()));
+    app.state.messages.push(MessageRow::local_send("drop".to_owned(), "gone".to_owned()));
+    app.state.selected_message = 1;
+    let error = match app.delete_selected_message(&mut bus).await {
+        Ok(()) => {
+            return Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(
+                "target_not_found was swallowed".to_owned(),
+            )));
+        }
+        Err(error) => error,
+    };
+    assert_eq!(
+        crate::read_model::generated_code(&error),
+        Some(ramflux_sdk::bindings::GeneratedErrorCode::TargetNotFound.name())
+    );
+    assert_eq!(app.state.messages.len(), 1);
+    assert_eq!(app.state.messages[0].id, "keep");
+    let delete =
+        bus.requests.iter().find(|request| request.method == "message.delete").ok_or_else(
+            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing delete".to_owned())),
+        )?;
+    assert_eq!(delete.body["message_id"], "drop");
+    Ok(())
+}
+
+#[tokio::test]
+async fn switching_conversation_reloads_the_page_and_resets_the_cursor() -> Result<(), TuiError> {
+    let mut bus = MockBus::default();
+    let mut app = TuiApp::new("alice");
+    app.state.selected_panel = Panel::Conversations;
+    for id in ["conv-a", "conv-b"] {
+        app.state.conversations.push(ConversationRow {
+            id: id.to_owned(),
+            title: id.to_owned(),
+            last_message: String::new(),
+            unread: 0,
+            status: "synced".to_owned(),
+            recipient_device_id: None,
+            target_delivery_id: None,
+        });
+    }
+    app.stream_cursors.insert("alice".to_owned(), 40);
+    app.handle_input(&mut bus, TuiInput::Up).await?;
+    assert_eq!(app.stream_cursors.get("alice").copied(), Some(40));
+    assert!(bus.requests.iter().all(|request| request.method != "message.read"));
+    app.handle_input(&mut bus, TuiInput::Down).await?;
+    let read =
+        bus.requests.iter().find(|request| request.method == "message.read").ok_or_else(|| {
+            TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing page read".to_owned()))
+        })?;
+    assert_eq!(read.body["conversation_id"], "conv-b");
+    assert_eq!(read.body["read_model"], true);
+    assert!(read.body.get("after_sequence").is_none());
+    assert_eq!(app.stream_cursors.get("alice").copied(), Some(10));
+    Ok(())
+}
+
+#[tokio::test]
+async fn send_without_event_id_does_not_insert_a_client_message_row() -> Result<(), TuiError> {
+    let mut bus = MockBus { omit_send_event_id: true, ..MockBus::default() };
+    let mut app = TuiApp::new("alice_account");
+    app.refresh_all(&mut bus).await?;
+    app.state.selected_panel = Panel::Messages;
+    app.state.input = "orphan".to_owned();
+    app.handle_input(&mut bus, TuiInput::Enter).await?;
+    assert!(app.state.messages.iter().all(|message| message.id != "client_sent"));
+    assert!(app.state.messages.iter().all(|message| message.body != "orphan"));
     Ok(())
 }
 

@@ -61,7 +61,7 @@ impl TuiApp {
             return Ok(());
         }
         if event.method == "stream.lagged" {
-            self.follow_message_changes(bus).await?;
+            self.follow_message_changes(bus, message_id_hint(event)).await?;
             return self.subscribe_once(bus, false).await;
         }
         if let Some(seq) = event.seq
@@ -76,11 +76,11 @@ impl TuiApp {
             | "message.received"
             | "message.updated"
             | "group.message.received" => {
-                resynced = self.follow_message_changes(bus).await?;
+                resynced = self.follow_message_changes(bus, message_id_hint(event)).await?;
             }
             "conversation.changed" | "task.changed" => {
                 self.refresh_conversations(bus).await?;
-                resynced = self.follow_message_changes(bus).await?;
+                resynced = self.follow_message_changes(bus, message_id_hint(event)).await?;
             }
             "group.changed" => self.refresh_groups(bus).await?,
             "contact.changed" | "safety.changed" => self.refresh_contacts(bus).await?,
@@ -102,7 +102,7 @@ impl TuiApp {
                         self.state.object_transfers.push(row);
                     }
                 }
-                resynced = self.follow_message_changes(bus).await?;
+                resynced = self.follow_message_changes(bus, message_id_hint(event)).await?;
             }
             _ => {}
         }
@@ -135,6 +135,10 @@ impl TuiApp {
         }
         Ok(())
     }
+}
+
+fn message_id_hint(event: &ramflux_sdk::LocalBusFrame) -> Option<&str> {
+    event.body.get("message_id").and_then(serde_json::Value::as_str).filter(|id| !id.is_empty())
 }
 
 fn is_resync_required(error: &TuiError) -> bool {
@@ -182,6 +186,8 @@ mod tests {
         typed_resync: bool,
         /// Text error that merely contains the words `resync_required`.
         text_resync: bool,
+        /// Typed refusal of the next `message.read` that carries `after_sequence`.
+        change_refusal: Option<String>,
     }
     #[async_trait]
     impl TuiBus for Bus {
@@ -229,7 +235,18 @@ mod tests {
                 "conversation.list" => {
                     serde_json::json!({"conversations":[{"conversation_id":"thread","unread_count":1}]})
                 }
+                "message.read"
+                    if let Some(id) = body
+                        .get("message_id")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|id| !id.is_empty()) =>
+                {
+                    crate::read_model::sample_detail(conversation, id, "single content")
+                }
                 "message.read" if body.get("after_sequence").is_some() => {
+                    if let Some(code) = self.change_refusal.take() {
+                        return Err(typed_refusal(code));
+                    }
                     let after =
                         body.get("after_sequence").and_then(serde_json::Value::as_u64).unwrap_or(0);
                     crate::read_model::sample_changes(conversation, after)
@@ -244,6 +261,14 @@ mod tests {
             std::future::pending().await
         }
     }
+    fn typed_refusal(code: String) -> TuiError {
+        TuiError::Sdk(ramflux_sdk::SdkError::LocalBusRefused {
+            code,
+            message: "change refused".to_owned(),
+            body: Box::new(serde_json::json!({})),
+        })
+    }
+
     fn event(topic: &str, seq: Option<u64>) -> ramflux_sdk::LocalBusFrame {
         ramflux_sdk::LocalBusFrame {
             kind: ramflux_sdk::LocalBusFrameKind::Event,
@@ -390,6 +415,85 @@ mod tests {
                 .messages
                 .iter()
                 .any(|message| message.id == "kept" && message.body == "kept body")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn typed_change_errors_keep_the_cursor_and_the_rows() -> Result<(), TuiError> {
+        let codes = [
+            ramflux_sdk::bindings::GeneratedErrorCode::TargetNotFound.name(),
+            ramflux_sdk::bindings::GeneratedErrorCode::SchemaResetRequired.name(),
+            ramflux_sdk::bindings::GeneratedErrorCode::Internal.name(),
+            ramflux_sdk::bindings::GeneratedErrorCode::PayloadTooLarge.name(),
+        ];
+        for code in codes {
+            let mut app = TuiApp::new("bob");
+            let mut bus = Bus::default();
+            app.refresh_all(&mut bus).await?;
+            let before = app.state.messages.len();
+            app.state
+                .messages
+                .push(crate::MessageRow::local_send("keep".to_owned(), "stay".to_owned()));
+            bus.change_refusal = Some(code.to_owned());
+            let error = match app
+                .apply_stream_event(&mut bus, &event("message.received", Some(11)))
+                .await
+            {
+                Ok(()) => {
+                    return Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(
+                        "typed change error was swallowed".to_owned(),
+                    )));
+                }
+                Err(error) => error,
+            };
+            assert_eq!(crate::read_model::generated_code(&error), Some(code));
+            assert_eq!(app.stream_cursors.get("bob").copied(), Some(10));
+            assert_eq!(app.state.messages.len(), before + 1);
+            assert!(app.state.messages.iter().any(|message| message.id == "keep"));
+            assert!(bus.calls.iter().all(|(_, body)| body.get("message_id").is_none()));
+            assert_eq!(app.state.status_message.as_deref(), Some(code));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn payload_too_large_reads_one_message_and_keeps_the_cursor() -> Result<(), TuiError> {
+        let mut app = TuiApp::new("bob");
+        let mut bus = Bus::default();
+        app.refresh_all(&mut bus).await?;
+        bus.calls.clear();
+        bus.change_refusal =
+            Some(ramflux_sdk::bindings::GeneratedErrorCode::PayloadTooLarge.name().to_owned());
+        let mut frame = event("message.schema.updated", Some(11));
+        frame.body = serde_json::json!({"message_id": "msg_big"});
+        let error = match app.apply_stream_event(&mut bus, &frame).await {
+            Ok(()) => {
+                return Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(
+                    "payload_too_large was swallowed".to_owned(),
+                )));
+            }
+            Err(error) => error,
+        };
+        assert_eq!(
+            crate::read_model::generated_code(&error),
+            Some(ramflux_sdk::bindings::GeneratedErrorCode::PayloadTooLarge.name())
+        );
+        assert_eq!(app.stream_cursors.get("bob").copied(), Some(10));
+        assert!(bus.calls.iter().any(|(method, body)| {
+            method == "message.read"
+                && body.get("message_id").and_then(serde_json::Value::as_str) == Some("msg_big")
+                && body.get("after_sequence").is_none()
+        }));
+        assert!(
+            app.state
+                .messages
+                .iter()
+                .any(|message| { message.id == "msg_big" && message.body == "single content" })
+        );
+        assert_eq!(
+            app.state.status_message.as_deref(),
+            Some(ramflux_sdk::bindings::GeneratedErrorCode::PayloadTooLarge.name())
         );
         Ok(())
     }
