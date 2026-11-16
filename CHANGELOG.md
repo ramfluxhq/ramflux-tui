@@ -7,6 +7,16 @@ Versioning.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-16
+
+First release under the shared Ramflux product version (all repos move together).
+
+- Reads the generation-1 message read model of the product and keeps the stream position across reconnects.
+- `rf-tui --version` prints the version and the commit it was built from.
+- Used by the Demo B tooling to drive a real daemon from a terminal.
+
+Details:
+
 ### Added
 
 - Initial public AGPL Ramflux TUI repository.

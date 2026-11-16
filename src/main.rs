@@ -17,7 +17,11 @@ use std::time::Duration;
 const DEFAULT_SOCKET: &str = "/tmp/ramflux/rfd.sock";
 
 #[derive(Parser)]
-#[command(name = "rf-tui", about = "Private Ramflux TUI over the open local SDK bus")]
+#[command(
+    name = "rf-tui",
+    version = ramflux_cli_pro::VERSION,
+    about = "Private Ramflux TUI over the open local SDK bus"
+)]
 struct Cli {
     #[arg(long, default_value = DEFAULT_SOCKET)]
     socket: PathBuf,
