@@ -339,16 +339,23 @@ async fn render_and_act_on_native_card(
     bus: &mut MockBus,
     terminal: &mut Terminal<TestBackend>,
 ) -> Result<(), TuiError> {
-    let snapshot: ramflux_protocol::SurfaceSnapshot = serde_json::from_value(serde_json::json!({
-        "surfaceId":"note","catalogId":ramflux_protocol::CATALOG_ID,"fallbackText":"Agent note",
-        "closed":false,"final":[],"components":[
-            {"id":"root","component":"Column","children":["text","field","button"]},
-            {"id":"text","component":"Text","text":"Review the note"},
-            {"id":"field","component":"TextField","label":"Comment","value":{"@path":"/note"}},
-            {"id":"button","component":"Button","child":"label","action":{"event":{"name":"save","context":{"note":{"@path":"/note"}}}}},
-            {"id":"label","component":"Text","text":"Save note"}
-        ],"dataModel":{"note":"base"}
-    }))?;
+    let mut snapshot: ramflux_protocol::SurfaceSnapshot = serde_json::from_value(
+        serde_json::json!({
+            "surfaceId":"note","catalogId":ramflux_protocol::CATALOG_ID,"fallbackText":"Agent note",
+            "closed":false,"final":[],"components":[
+                {"id":"root","component":"Column","children":["text","field","button"]},
+                {"id":"text","component":"Text","text":"Review the note"},
+                {"id":"field","component":"TextField","label":"Comment","value":{"@path":"/note"}},
+                {"id":"button","component":"Button","child":"label","action":{"event":{"name":"save","context":{"note":{"@path":"/note"}}}}},
+                {"id":"label","component":"Text","text":"Save note"}
+            ],"dataModel":{"note":"base"}
+        }),
+    )?;
+    snapshot.components.sort_by(|a, b| {
+        a.get("id")
+            .and_then(serde_json::Value::as_str)
+            .cmp(&b.get("id").and_then(serde_json::Value::as_str))
+    });
     let hash = snapshot.hash().map_err(crate::surface::protocol)?;
     bus.surface = serde_json::json!({"surface_ref":"card-ref","conversation_id":crate::DEFAULT_CONVERSATION_ID,
         "surface_id":"note","author_principal_id":"own-agent","render_allowed":true,
@@ -370,11 +377,11 @@ async fn render_and_act_on_native_card(
         .requests
         .iter()
         .find(|r| r.method == "surface.action")
-        .expect("test: native action request");
+        .ok_or_else(|| TuiError::ReadModel("test: native action request missing".into()))?;
     let wire = ramflux_protocol::decode_base64url(
-        sent.body["wire_base64"].as_str().expect("test: action wire"),
+        sent.body.get("wire_base64").and_then(serde_json::Value::as_str).ok_or_else(|| TuiError::ReadModel("test: action wire missing".into()))?,
     )
-    .expect("test: base64 action");
+    .map_err(crate::surface::protocol)?;
     let action = ramflux_protocol::SurfaceAction::from_wire_bytes(&wire)
         .map_err(crate::surface::protocol)?;
     assert_eq!(

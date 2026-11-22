@@ -117,8 +117,7 @@ impl TuiApp {
             return self.edit_card_input(input);
         }
         match input {
-            TuiInput::ExitCompose => self.cards.open = false,
-            TuiInput::Quit => self.cards.open = false,
+            TuiInput::ExitCompose | TuiInput::Quit => self.cards.open = false,
             TuiInput::Up => self.cards.control = self.cards.control.saturating_sub(1),
             TuiInput::Down => {
                 let count = self
@@ -206,7 +205,7 @@ impl TuiApp {
                         "Action refused: {}",
                         body.get("reason_code")
                             .and_then(Value::as_str)
-                            .map_or("not accepted".into(), super::render::safe)
+                            .map_or_else(|| "not accepted".into(), super::render::safe)
                     ),
                     Err(_) => {
                         "Action send failed; delivery is unknown. Refresh before acting again"
