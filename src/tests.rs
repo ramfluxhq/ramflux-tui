@@ -318,7 +318,7 @@ async fn renders_conversations_messages_contacts_and_groups() -> Result<(), TuiE
     let buffer = buffer_text(&terminal);
     assert!(buffer.contains("approval_tui_1"));
     assert!(buffer.contains("attended_local"));
-    assert!(buffer.contains("approval_card"));
+    assert!(buffer.contains("a=approve"), "attended approval must retain its keyboard action");
     Ok(())
 }
 
