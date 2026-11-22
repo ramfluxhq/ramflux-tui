@@ -43,7 +43,7 @@ async fn run() -> Result<(), TuiError> {
     let mut app = TuiApp::new(cli.account);
     app.set_socket(&cli.socket);
     app.apply_locale_env();
-    app.refresh_all(&mut bus).await?;
+    app.start_session(&mut bus).await?;
 
     let mut terminal = setup_terminal()?;
     let result = run_terminal_loop(&mut terminal, &mut app, &mut bus, &cli.socket).await;
@@ -115,6 +115,9 @@ async fn reconnect(app: &mut TuiApp, bus: &mut SdkLocalBus, socket: &std::path::
     tokio::time::sleep(Duration::from_millis(250)).await;
     if let Ok(connected) = SdkLocalBus::connect(socket).await {
         *bus = connected;
+        if app.captures_text() {
+            return;
+        }
         if let Err(error) = app.refresh_all(bus).await {
             app.state.status_message = Some(format!("reconnecting: {error}"));
         }
