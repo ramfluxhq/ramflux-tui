@@ -78,6 +78,7 @@ impl Card {
         let snapshot: SurfaceSnapshot = serde_json::from_value(
             value.get("snapshot").cloned().ok_or_else(|| invalid("missing snapshot"))?,
         )?;
+        card.fallback.clone_from(&snapshot.fallback_text);
         if snapshot.surface_id != string(value, "surface_id")? {
             return Err(invalid("snapshot identity mismatch"));
         }
