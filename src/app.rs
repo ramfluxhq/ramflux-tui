@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Span Brain
 
+#[path = "account_ui.rs"]
+mod account_ui;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
@@ -8,6 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
 use std::fmt::Write as _;
 
+use crate::i18n::{self, Key};
 use crate::parsing::{
     parse_approval_row, parse_approvals, parse_contacts, parse_conversations, parse_devices,
     parse_groups, parse_transfer,
@@ -27,12 +31,13 @@ const MAX_CHANGE_ROUNDS: u32 = 8;
 pub(crate) const MAX_CACHED_MESSAGES: usize = 100;
 
 /// TUI application controller.
-#[derive(Clone, Debug, Default)]
 pub struct TuiApp {
     pub state: TuiState,
     should_quit: bool,
     pub(crate) cards: crate::surface::Cards,
     pub(crate) stream_cursors: std::collections::BTreeMap<String, u64>,
+    account_ui: account_ui::AccountUi,
+    socket: Option<std::path::PathBuf>,
 }
 
 impl TuiApp {
@@ -44,7 +49,27 @@ impl TuiApp {
             should_quit: false,
             cards: crate::surface::Cards::default(),
             stream_cursors: std::collections::BTreeMap::new(),
+            account_ui: account_ui::AccountUi::default(),
+            socket: None,
         }
+    }
+
+    /// Remembers the daemon socket used by creation and recovery.
+    pub fn set_socket(&mut self, socket: impl AsRef<std::path::Path>) {
+        self.socket = Some(socket.as_ref().to_path_buf());
+    }
+
+    /// Applies `RAMFLUX_TUI_LANG` when it is set. Unset stays English.
+    pub fn apply_locale_env(&mut self) {
+        if let Ok(value) = std::env::var("RAMFLUX_TUI_LANG") {
+            self.state.locale = i18n::locale_from_env(&value);
+        }
+    }
+
+    /// Account screens capture letters that the normal map treats as commands.
+    #[must_use]
+    pub const fn captures_text(&self) -> bool {
+        self.account_ui.is_open()
     }
 
     /// Returns true after the user requests exit.
@@ -105,6 +130,9 @@ impl TuiApp {
         bus: &mut B,
         input: TuiInput,
     ) -> Result<(), TuiError> {
+        if self.account_ui.is_open() {
+            return self.handle_account_input(bus, input).await;
+        }
         if self.cards.open {
             return self.handle_card_input(bus, &input).await;
         }
@@ -173,6 +201,13 @@ impl TuiApp {
             }
             TuiInput::Char('e') if self.state.selected_panel == Panel::Groups => {
                 self.set_selected_group_disappearing(bus, 3_600).await?;
+            }
+            TuiInput::Char('L') => self.lock_account(bus).await?,
+            TuiInput::Char('N') => self.begin_create(),
+            TuiInput::Char('P') => self.begin_rotate(),
+            TuiInput::Char('Y') => self.begin_recover().await?,
+            TuiInput::Char('G') => {
+                self.state.locale = self.state.locale.toggle();
             }
             TuiInput::Char(_value) => {}
             TuiInput::Backspace => {
@@ -246,10 +281,19 @@ impl TuiApp {
         frame.render_widget(
             Tabs::new(titles)
                 .select(self.state.selected_panel.index())
-                .block(Block::default().title("rf tui").borders(Borders::ALL))
+                .block(
+                    Block::default()
+                        .title(format!("rf tui  {}", i18n::text(self.state.locale, Key::HintKeys)))
+                        .borders(Borders::ALL),
+                )
                 .highlight_style(Style::default().add_modifier(Modifier::BOLD)),
             rows[0],
         );
+        if self.account_ui.is_open() {
+            self.render_account(frame, rows[1]);
+            self.render_account_footer(frame, rows[2]);
+            return;
+        }
         self.render_body(frame, rows[1]);
         let input_title = match self.state.input_mode {
             InputMode::Compose => "Message input [COMPOSE]",
@@ -1175,6 +1219,8 @@ impl TuiApp {
     }
 
     /// Switches the active local bus account and refreshes TUI projections.
+    ///
+    /// The request body is empty. Account switch does not ask for an account code.
     ///
     /// # Errors
     /// Returns an error when account.switch or the follow-up refresh fails.

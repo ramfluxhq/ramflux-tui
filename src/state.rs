@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use crate::DEFAULT_ACCOUNT_ID;
+use crate::i18n::Locale;
 
 /// Top-level TUI panel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -227,6 +228,8 @@ pub struct TuiState {
     pub approvals: Vec<ApprovalRow>,
     pub selected_approval: usize,
     pub status_message: Option<String>,
+    /// Account-screen language. Panel copy outside those screens stays as written.
+    pub locale: Locale,
     pub(crate) next_message_id: u64,
 }
 
@@ -253,6 +256,7 @@ impl Default for TuiState {
             approvals: Vec::new(),
             selected_approval: 0,
             status_message: None,
+            locale: Locale::En,
             next_message_id: 1,
         }
     }
