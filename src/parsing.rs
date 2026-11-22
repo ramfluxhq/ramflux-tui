@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (c) 2026 Span Brain
 
-use crate::a2ui_render::render_a2ui_for_approval;
 use crate::{ApprovalRow, ContactRow, ConversationRow, DeviceRow, GroupRow, ObjectTransferRow};
 
 pub(crate) fn parse_transfer(response: &serde_json::Value) -> Option<ObjectTransferRow> {
@@ -148,11 +147,6 @@ pub(crate) fn parse_approvals(response: &serde_json::Value) -> Vec<ApprovalRow> 
 }
 
 pub(crate) fn parse_approval_row(approval: &serde_json::Value) -> ApprovalRow {
-    let surface = approval
-        .pointer("/details/surface")
-        .or_else(|| approval.get("surface"))
-        .and_then(|value| serde_json::from_value(value.clone()).ok());
-    let rendered_surface = surface.as_ref().and_then(render_a2ui_for_approval);
     let confirmation_mode = string_field(approval, "confirmation_mode", "remote_app");
     ApprovalRow {
         id: string_field(approval, "approval_id", "approval"),
@@ -165,8 +159,6 @@ pub(crate) fn parse_approval_row(approval: &serde_json::Value) -> ApprovalRow {
         mode: confirmation_mode.clone(),
         confirmation_mode,
         status: string_field(approval, "status", "pending"),
-        surface,
-        rendered_surface,
     }
 }
 

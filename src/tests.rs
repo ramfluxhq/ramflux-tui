@@ -8,7 +8,6 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use std::collections::VecDeque;
 
-use crate::a2ui_render::render_a2ui_for_approval;
 use crate::parsing::parse_approvals;
 use crate::*;
 
@@ -131,15 +130,6 @@ impl TuiBus for MockBus {
                     "is_local": true
                 }]
             }),
-            "device.activate" => serde_json::json!({
-                "device_id": body.get("device_id").cloned().unwrap_or(serde_json::Value::Null),
-                "devices": [{
-                    "device_id": "device_tui_alice_b",
-                    "device_epoch": 2,
-                    "target_delivery_id": "target_tui_alice_b",
-                    "is_local": true
-                }]
-            }),
             "device.revoke" => self.revoke_response.clone().unwrap_or_else(|| {
                 serde_json::json!({
                     "device_id": body.get("device_id").cloned().unwrap_or(serde_json::Value::Null),
@@ -158,7 +148,6 @@ impl TuiBus for MockBus {
             "mcp.approval.list" => serde_json::json!({
                 "approvals": mock_approvals()
             }),
-            "a2ui.action" => serde_json::json!({"accepted": true}),
             "grant.approve" | "grant.deny" => serde_json::json!({"ok": true}),
             "conversation.send" => {
                 let mut response = serde_json::json!({
@@ -283,20 +272,7 @@ fn mock_approvals() -> serde_json::Value {
         "tool_name": "echo",
         "risk_level": "low",
         "confirmation_mode": "attended_local",
-        "status": "pending",
-        "details": {
-            "surface": {
-                "surface_id": "surface_tui_approval",
-                "catalog": "ramflux.basic.v1",
-                "catalog_version": "1",
-                "components": [{
-                    "id": "approve_button",
-                    "component_type": "approval_card",
-                    "action_permission": "mcp.approve",
-                    "children": []
-                }]
-            }
-        }
+        "status": "pending"
     }])
 }
 
@@ -343,7 +319,6 @@ async fn renders_conversations_messages_contacts_and_groups() -> Result<(), TuiE
     assert!(buffer.contains("approval_tui_1"));
     assert!(buffer.contains("attended_local"));
     assert!(buffer.contains("approval_card"));
-    assert!(buffer.contains("a2ui_hash="));
     Ok(())
 }
 
@@ -513,26 +488,16 @@ async fn group_panel_surfaces_governance_actions() -> Result<(), TuiError> {
 }
 
 #[tokio::test]
-async fn contacts_panel_surfaces_device_restore_and_revoke() -> Result<(), TuiError> {
+async fn contacts_panel_surfaces_device_list_and_revoke() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
 
     app.refresh_devices(&mut bus).await?;
-    app.activate_device(&mut bus, "device_tui_alice_b", "target_tui_alice_b", [0x22; 32], Some(2))
-        .await?;
     app.revoke_device(&mut bus, "device_tui_alice_b").await?;
 
     assert!(app.state.devices.iter().any(|device| {
         device.device_id == "device_tui_alice_b" && device.is_local && device.device_epoch == 2
     }));
-    let activate =
-        bus.requests.iter().find(|request| request.method == "device.activate").ok_or_else(
-            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing activate".to_owned())),
-        )?;
-    assert_eq!(activate.sdk_api, "device");
-    assert_eq!(activate.body["device_id"], "device_tui_alice_b");
-    assert_eq!(activate.body["target_delivery_id"], "target_tui_alice_b");
-    assert_eq!(activate.body["device_epoch"], 2);
     let revoke =
         bus.requests.iter().find(|request| request.method == "device.revoke").ok_or_else(|| {
             TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing revoke".to_owned()))
@@ -547,14 +512,10 @@ async fn contacts_panel_surfaces_device_restore_and_revoke() -> Result<(), TuiEr
 }
 
 #[tokio::test]
-async fn contacts_panel_surfaces_own_device_sync_actions() -> Result<(), TuiError> {
+async fn contacts_panel_surfaces_own_device_sync_export() -> Result<(), TuiError> {
     let mut bus = MockBus::default();
     let mut app = TuiApp::new("alice_account");
 
-    let envelope = serde_json::json!({
-        "schema": "ramflux.sdk.own_device_sync.v1",
-        "snapshot_id": "snapshot_tui"
-    });
     app.export_device_sync(
         &mut bus,
         "device_tui_alice_b",
@@ -562,7 +523,6 @@ async fn contacts_panel_surfaces_own_device_sync_actions() -> Result<(), TuiErro
         Some("relay-key".to_owned()),
     )
     .await?;
-    app.import_device_sync(&mut bus, envelope.clone(), Some("relay-key".to_owned())).await?;
 
     let export =
         bus.requests.iter().find(|request| request.method == "device.sync.export").ok_or_else(
@@ -570,11 +530,6 @@ async fn contacts_panel_surfaces_own_device_sync_actions() -> Result<(), TuiErro
         )?;
     assert_eq!(export.body["target_device_id"], "device_tui_alice_b");
     assert_eq!(export.body["relay_endpoint"], "http://127.0.0.1:18084");
-    let import =
-        bus.requests.iter().find(|request| request.method == "device.sync.import").ok_or_else(
-            || TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing sync import".to_owned())),
-        )?;
-    assert_eq!(import.body["envelope"], envelope);
     Ok(())
 }
 
@@ -948,12 +903,6 @@ async fn approval_panel_approves_pending_request_over_bus() -> Result<(), TuiErr
     app.refresh_all(&mut bus).await?;
     app.state.selected_panel = Panel::Approvals;
     app.handle_input(&mut bus, TuiInput::Char('a')).await?;
-    let action = bus.requests.iter().any(|request| {
-        request.method == "a2ui.action"
-            && request.body.pointer("/action/permission").and_then(serde_json::Value::as_str)
-                == Some("mcp.approve")
-    });
-    assert!(action);
     let approved = bus.requests.iter().any(|request| {
         request.method == "grant.approve"
             && request.body.get("approval_id").and_then(serde_json::Value::as_str)
@@ -993,27 +942,6 @@ async fn remote_app_approval_is_visible_and_not_locally_approved() -> Result<(),
     app.handle_input(&mut bus, TuiInput::Char('a')).await?;
     assert_eq!(app.state.status_message.as_deref(), Some("该审批需 App 端签名授权(remote_app)"));
     assert!(!bus.requests.iter().any(|request| request.method == "grant.approve"));
-    Ok(())
-}
-
-#[test]
-fn a2ui_unknown_component_uses_fallback_renderer() -> Result<(), TuiError> {
-    let surface = ramflux_sync::A2uiSurface {
-        surface_id: "surface_unknown".to_owned(),
-        catalog: "ramflux.basic.v1".to_owned(),
-        catalog_version: "1".to_owned(),
-        components: vec![ramflux_sync::A2uiComponent {
-            id: "mystery".to_owned(),
-            component_type: "future_card".to_owned(),
-            action_permission: None,
-            children: Vec::new(),
-        }],
-    };
-    let rendered = render_a2ui_for_approval(&surface).ok_or_else(|| {
-        TuiError::Sdk(ramflux_sdk::SdkError::LocalBus("missing fallback".to_owned()))
-    })?;
-    assert!(rendered.fallback_used);
-    assert!(rendered.semantic_snapshot.contains("future_card"));
     Ok(())
 }
 
