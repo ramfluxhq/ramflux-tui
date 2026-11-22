@@ -31,6 +31,7 @@ pub(crate) const MAX_CACHED_MESSAGES: usize = 100;
 pub struct TuiApp {
     pub state: TuiState,
     should_quit: bool,
+    pub(crate) cards: crate::surface::Cards,
     pub(crate) stream_cursors: std::collections::BTreeMap<String, u64>,
 }
 
@@ -41,6 +42,7 @@ impl TuiApp {
         Self {
             state: TuiState { account_id: account_id.into(), ..TuiState::default() },
             should_quit: false,
+            cards: crate::surface::Cards::default(),
             stream_cursors: std::collections::BTreeMap::new(),
         }
     }
@@ -103,6 +105,9 @@ impl TuiApp {
         bus: &mut B,
         input: TuiInput,
     ) -> Result<(), TuiError> {
+        if self.cards.open {
+            return self.handle_card_input(bus, &input).await;
+        }
         if self.state.input_mode == InputMode::Compose {
             return self.handle_compose_input(bus, input).await;
         }
@@ -143,6 +148,13 @@ impl TuiApp {
             }
             TuiInput::Char('V') if self.state.selected_panel == Panel::Contacts => {
                 self.verify_selected_contact(bus).await?;
+            }
+            TuiInput::Char('c') if self.state.selected_panel == Panel::Messages => {
+                self.refresh_cards(bus).await?;
+                self.cards.open = !self.cards.rows.is_empty();
+                if !self.cards.open {
+                    self.state.status_message = Some("No cards in this conversation".into());
+                }
             }
             TuiInput::Char('x') if self.state.selected_panel == Panel::Messages => {
                 self.delete_selected_message(bus).await?;
@@ -289,7 +301,11 @@ impl TuiApp {
     }
 
     fn render_messages(&self, frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
-        let lines = self
+        if self.cards.open {
+            self.cards.render(frame, area);
+            return;
+        }
+        let mut lines = self
             .state
             .messages
             .iter()
@@ -306,11 +322,12 @@ impl TuiApp {
                 ))
             })
             .collect::<Vec<_>>();
+        lines.extend(self.cards.summary());
         frame.render_widget(
             Paragraph::new(lines)
                 .block(
                     Block::default()
-                        .title("Messages  /attach <path> l=delivered r=read x=delete")
+                        .title("Messages  c=cards  /attach <path> l=delivered r=read x=delete")
                         .borders(Borders::ALL),
                 )
                 .wrap(Wrap { trim: false }),
@@ -540,6 +557,7 @@ impl TuiApp {
         read_model::reject_numeric_cursor_sequence(page.next_before.as_ref())?;
         self.state.messages = page.messages;
         self.stream_cursors.insert(self.state.account_id.clone(), page.snapshot_sequence);
+        self.refresh_cards(bus).await?;
         Ok(())
     }
 
@@ -1177,6 +1195,7 @@ impl TuiApp {
             .get("active_account_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or(account_id);
+        self.cards = crate::surface::Cards::default();
         active_account_id.clone_into(&mut self.state.account_id);
         self.state.selected_conversation = 0;
         self.state.selected_message = 0;

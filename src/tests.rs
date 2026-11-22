@@ -19,6 +19,7 @@ struct MockBus {
     /// which `parse_conversations` reads as "no real conversations" so the
     /// synthetic Default DM fallback still applies.
     conversation_list: serde_json::Value,
+    surface: serde_json::Value,
     revoke_response: Option<serde_json::Value>,
     /// `(method, generated code)` refused once the request has been recorded.
     typed_refusal: Option<(String, String)>,
@@ -77,6 +78,16 @@ impl TuiBus for MockBus {
             .and_then(serde_json::Value::as_str)
             .unwrap_or(crate::DEFAULT_CONVERSATION_ID);
         Ok(match method {
+            "surface.list" => {
+                let rows = if self.surface.is_null() {
+                    vec![]
+                } else {
+                    vec![serde_json::json!({"surface_ref":"card-ref"})]
+                };
+                serde_json::json!({"surfaces":rows,"next_cursor":null})
+            }
+            "surface.get" => self.surface.clone(),
+            "surface.action" => serde_json::json!({"accepted":true}),
             "message.read" if body.get("after_sequence").is_some() => {
                 let after =
                     body.get("after_sequence").and_then(serde_json::Value::as_u64).unwrap_or(0);
@@ -296,6 +307,7 @@ async fn renders_conversations_messages_contacts_and_groups() -> Result<(), TuiE
         .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
     let buffer = buffer_text(&terminal);
     assert!(buffer.contains("hello from bus"));
+    render_and_act_on_native_card(&mut app, &mut bus, &mut terminal).await?;
     app.state.selected_panel = Panel::Contacts;
     terminal
         .draw(|frame| app.render(frame))
@@ -319,6 +331,88 @@ async fn renders_conversations_messages_contacts_and_groups() -> Result<(), TuiE
     assert!(buffer.contains("approval_tui_1"));
     assert!(buffer.contains("attended_local"));
     assert!(buffer.contains("a=approve"), "attended approval must retain its keyboard action");
+    Ok(())
+}
+
+async fn render_and_act_on_native_card(
+    app: &mut TuiApp,
+    bus: &mut MockBus,
+    terminal: &mut Terminal<TestBackend>,
+) -> Result<(), TuiError> {
+    let mut snapshot: ramflux_protocol::SurfaceSnapshot = serde_json::from_value(
+        serde_json::json!({
+            "surfaceId":"note","catalogId":ramflux_protocol::CATALOG_ID,"fallbackText":"Agent note",
+            "closed":false,"final":[],"components":[
+                {"id":"root","component":"Column","children":["text","field","button"]},
+                {"id":"text","component":"Text","text":"Review the note"},
+                {"id":"field","component":"TextField","label":"Comment","value":{"@path":"/note"}},
+                {"id":"button","component":"Button","child":"label","action":{"event":{"name":"save","context":{"note":{"@path":"/note"}}}}},
+                {"id":"label","component":"Text","text":"Save note"}
+            ],"dataModel":{"note":"base"}
+        }),
+    )?;
+    snapshot.components.sort_by(|a, b| {
+        a.get("id")
+            .and_then(serde_json::Value::as_str)
+            .cmp(&b.get("id").and_then(serde_json::Value::as_str))
+    });
+    let hash = snapshot.hash().map_err(crate::surface::protocol)?;
+    bus.surface = serde_json::json!({"surface_ref":"card-ref","conversation_id":crate::DEFAULT_CONVERSATION_ID,
+        "surface_id":"note","author_principal_id":"own-agent","render_allowed":true,
+        "version":1,"surface_hash":hash,"closed":false,"out_of_sync":false,"fallback_text":"Agent note","snapshot":snapshot});
+    app.handle_input(bus, TuiInput::Char('c')).await?;
+    terminal
+        .draw(|frame| app.render(frame))
+        .map_err(|error| TuiError::ReadModel(error.to_string()))?;
+    let buffer = buffer_text(terminal);
+    assert!(buffer.contains("Review the note"), "native text must render in the conversation card");
+    assert!(buffer.contains("Comment: base"), "native input must show its model value");
+    assert!(buffer.contains("Save note"), "native event button must be visible");
+    app.handle_input(bus, TuiInput::Enter).await?;
+    app.handle_input(bus, TuiInput::Char('!')).await?;
+    app.handle_input(bus, TuiInput::Enter).await?;
+    app.handle_input(bus, TuiInput::Down).await?;
+    app.handle_input(bus, TuiInput::Enter).await?;
+    let sent = bus
+        .requests
+        .iter()
+        .find(|r| r.method == "surface.action")
+        .ok_or_else(|| TuiError::ReadModel("test: native action request missing".into()))?;
+    let wire = ramflux_protocol::decode_base64url(
+        sent.body
+            .get("wire_base64")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| TuiError::ReadModel("test: action wire missing".into()))?,
+    )
+    .map_err(crate::surface::protocol)?;
+    let action = ramflux_protocol::SurfaceAction::from_wire_bytes(&wire)
+        .map_err(crate::surface::protocol)?;
+    assert_eq!(
+        action.values().get("note"),
+        Some(&serde_json::json!("base!")),
+        "action must carry only the raw edited input"
+    );
+    assert_eq!(action.surface_hash(), hash, "action must bind the displayed hash");
+    bus.surface["render_allowed"] = serde_json::json!(false);
+    let sent_before = bus.requests.iter().filter(|r| r.method == "surface.action").count();
+    assert!(
+        app.handle_input(bus, TuiInput::Enter).await.is_err(),
+        "activation must re-read revoked renderer authority"
+    );
+    assert_eq!(
+        bus.requests.iter().filter(|r| r.method == "surface.action").count(),
+        sent_before,
+        "a stale cached card must not send an action"
+    );
+    terminal
+        .draw(|frame| app.render(frame))
+        .map_err(|error| TuiError::ReadModel(error.to_string()))?;
+    let buffer = buffer_text(terminal);
+    assert!(
+        !buffer.contains("Review the note"),
+        "snapshot readability must not bypass renderer authorization"
+    );
+    app.handle_input(bus, TuiInput::ExitCompose).await?;
     Ok(())
 }
 

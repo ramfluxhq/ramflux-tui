@@ -62,6 +62,7 @@ impl TuiApp {
         }
         if event.method == "stream.lagged" {
             self.follow_message_changes(bus, message_id_hint(event)).await?;
+            self.refresh_cards(bus).await?;
             return self.subscribe_once(bus, false).await;
         }
         if let Some(seq) = event.seq
@@ -82,6 +83,7 @@ impl TuiApp {
                 self.refresh_conversations(bus).await?;
                 resynced = self.follow_message_changes(bus, message_id_hint(event)).await?;
             }
+            "surface.changed" => self.refresh_cards(bus).await?,
             "group.changed" => self.refresh_groups(bus).await?,
             "contact.changed" | "safety.changed" => self.refresh_contacts(bus).await?,
             "mcp.approval.request" | "mcp.approval.granted" | "mcp.approval.denied" => {
@@ -105,6 +107,18 @@ impl TuiApp {
                 resynced = self.follow_message_changes(bus, message_id_hint(event)).await?;
             }
             _ => {}
+        }
+        if matches!(
+            event.method.as_str(),
+            "message.schema.updated"
+                | "state.changed"
+                | "message.received"
+                | "message.updated"
+                | "group.message.received"
+                | "conversation.changed"
+                | "task.changed"
+        ) {
+            self.refresh_cards(bus).await?;
         }
         if !resynced && let Some(seq) = event.seq {
             let account = self.state.account_id.clone();
@@ -232,6 +246,7 @@ mod tests {
                     }
                     serde_json::json!({"subscribed":true,"head_seq":10,"floor_seq":1})
                 }
+                "surface.list" => serde_json::json!({"surfaces":[],"next_cursor":null}),
                 "conversation.list" => {
                     serde_json::json!({"conversations":[{"conversation_id":"thread","unread_count":1}]})
                 }
