@@ -202,8 +202,6 @@ pub struct ApprovalRow {
     pub mode: String,
     pub confirmation_mode: String,
     pub status: String,
-    pub surface: Option<ramflux_sync::A2uiSurface>,
-    pub rendered_surface: Option<ramflux_sync::RenderedSurface>,
 }
 
 /// Immutable-ish view model rendered by ratatui.

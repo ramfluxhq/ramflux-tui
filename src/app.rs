@@ -8,7 +8,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
 use std::fmt::Write as _;
 
-use crate::a2ui_render::{approval_a2ui_suffix, dispatch_a2ui_approval_action};
 use crate::parsing::{
     parse_approval_row, parse_approvals, parse_contacts, parse_conversations, parse_devices,
     parse_groups, parse_transfer,
@@ -458,14 +457,13 @@ impl TuiApp {
             .map(|(index, item)| {
                 let marker = if index == self.state.selected_approval { "> " } else { "  " };
                 Line::from(format!(
-                    "{marker}{} {} risk={} mode={} {} {}{}",
+                    "{marker}{} {} risk={} mode={} {} {}",
                     item.id,
                     item.tool,
                     item.risk,
                     item.confirmation_mode,
                     item.status,
-                    Self::approval_action_hint(item),
-                    approval_a2ui_suffix(item)
+                    Self::approval_action_hint(item)
                 ))
             })
             .collect::<Vec<_>>();
@@ -630,12 +628,9 @@ impl TuiApp {
             self.state.status_message = Some("no approval selected".to_owned());
             return Ok(());
         };
-        if method == "grant.approve" {
-            if approval.confirmation_mode == "remote_app" {
-                self.state.status_message = Some("该审批需 App 端签名授权(remote_app)".to_owned());
-                return Ok(());
-            }
-            dispatch_a2ui_approval_action(bus, &self.state.account_id, &approval).await?;
+        if method == "grant.approve" && approval.confirmation_mode == "remote_app" {
+            self.state.status_message = Some("该审批需 App 端签名授权(remote_app)".to_owned());
+            return Ok(());
         }
         bus.request(
             Some(self.state.account_id.clone()),
@@ -702,34 +697,6 @@ impl TuiApp {
         Ok(())
     }
 
-    /// Activates a restored device through the SDK manifest-publish path.
-    ///
-    /// # Errors
-    /// Returns an error when the local bus device activation request fails.
-    pub async fn activate_device<B: TuiBus + Send>(
-        &mut self,
-        bus: &mut B,
-        device_id: &str,
-        target_delivery_id: &str,
-        device_seed: [u8; 32],
-        device_epoch: Option<u64>,
-    ) -> Result<(), TuiError> {
-        bus.request(
-            Some(self.state.account_id.clone()),
-            "device",
-            "device.activate",
-            serde_json::json!({
-                "device_id": device_id,
-                "target_delivery_id": target_delivery_id,
-                "device_seed": device_seed,
-                "device_epoch": device_epoch,
-            }),
-        )
-        .await?;
-        self.refresh_devices(bus).await?;
-        Ok(())
-    }
-
     /// Revokes one device through the root-authorized manifest update path.
     ///
     /// # Errors
@@ -781,28 +748,6 @@ impl TuiApp {
             serde_json::json!({
                 "target_device_id": target_device_id,
                 "relay_endpoint": relay_endpoint,
-                "relay_service_key_base64": relay_service_key_base64,
-            }),
-        )
-        .await
-    }
-
-    /// Imports an E2EE own-device history sync envelope.
-    ///
-    /// # Errors
-    /// Returns an error when the local bus own-device sync import request fails.
-    pub async fn import_device_sync<B: TuiBus + Send>(
-        &mut self,
-        bus: &mut B,
-        envelope: serde_json::Value,
-        relay_service_key_base64: Option<String>,
-    ) -> Result<serde_json::Value, TuiError> {
-        bus.request(
-            Some(self.state.account_id.clone()),
-            "device",
-            "device.sync.import",
-            serde_json::json!({
-                "envelope": envelope,
                 "relay_service_key_base64": relay_service_key_base64,
             }),
         )
@@ -1404,94 +1349,6 @@ impl TuiApp {
         self.group_member_control(bus, "group.member.kick", member_id, actor_id).await
     }
 
-    /// Bans a member from the selected group through a signed control event.
-    ///
-    /// # Errors
-    /// Returns an error when the local bus group governance request fails.
-    pub async fn ban_group_member<B: TuiBus + Send>(
-        &mut self,
-        bus: &mut B,
-        member_id: &str,
-        actor_id: &str,
-    ) -> Result<(), TuiError> {
-        self.group_member_control(bus, "group.member.ban", member_id, actor_id).await
-    }
-
-    /// Invites a device to the selected group through a signed control event.
-    ///
-    /// # Errors
-    /// Returns an error when the local bus group invite request fails.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn invite_group_member<B: TuiBus + Send>(
-        &mut self,
-        bus: &mut B,
-        actor_id: &str,
-        invitee_id: &str,
-        invitee_signing_public_key: &str,
-        target_delivery_id: &str,
-        expires_at: i64,
-    ) -> Result<(), TuiError> {
-        let Some(group) = self.state.groups.get(self.state.selected_group).cloned() else {
-            return Ok(());
-        };
-        bus.request(
-            Some(self.state.account_id.clone()),
-            "group",
-            "group.invite.create",
-            serde_json::json!({
-                "group_id": group.id,
-                "actor_id": actor_id,
-                "invitee_id": invitee_id,
-                "invitee_signing_public_key": invitee_signing_public_key,
-                "target_delivery_id": target_delivery_id,
-                "role": "member",
-                "expires_at": expires_at,
-            }),
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Accepts a pending group invite through a signed control event.
-    ///
-    /// # Errors
-    /// Returns an error when the local bus group invite accept request fails.
-    pub async fn accept_group_invite<B: TuiBus + Send>(
-        &mut self,
-        bus: &mut B,
-        actor_id: &str,
-        invite_id: &str,
-        target_delivery_id: Option<&str>,
-    ) -> Result<(), TuiError> {
-        let Some(group) = self.state.groups.get(self.state.selected_group).cloned() else {
-            return Ok(());
-        };
-        let response = bus
-            .request(
-                Some(self.state.account_id.clone()),
-                "group",
-                "group.invite.accept",
-                serde_json::json!({
-                    "group_id": group.id,
-                    "actor_id": actor_id,
-                    "invite_id": invite_id,
-                    "target_delivery_id": target_delivery_id,
-                }),
-            )
-            .await?;
-        if let Some(row) = self.state.groups.get_mut(self.state.selected_group) {
-            row.members = response
-                .get("members")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .collect();
-        }
-        Ok(())
-    }
-
     async fn group_member_control<B: TuiBus + Send>(
         &mut self,
         bus: &mut B,
@@ -1563,40 +1420,6 @@ impl TuiApp {
                 .filter_map(serde_json::Value::as_str)
                 .map(str::to_owned)
                 .collect();
-        }
-        Ok(())
-    }
-
-    /// Tombstones the selected group message through a signed control event.
-    ///
-    /// # Errors
-    /// Returns an error when the local bus group message delete request fails.
-    pub async fn delete_selected_group_message<B: TuiBus + Send>(
-        &mut self,
-        bus: &mut B,
-        actor_id: &str,
-    ) -> Result<(), TuiError> {
-        let Some(group) = self.state.groups.get(self.state.selected_group).cloned() else {
-            return Ok(());
-        };
-        let Some(message) = self.state.messages.get(self.state.selected_message).cloned() else {
-            return Ok(());
-        };
-        bus.request(
-            Some(self.state.account_id.clone()),
-            "group",
-            "group.message.delete",
-            serde_json::json!({
-                "group_id": group.id,
-                "actor_id": actor_id,
-                "message_id": message.id,
-                "delete_scope": "group_tombstone",
-            }),
-        )
-        .await?;
-        if let Some(row) = self.state.messages.get_mut(self.state.selected_message) {
-            "deleted".clone_into(&mut row.status);
-            row.body.clear();
         }
         Ok(())
     }

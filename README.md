@@ -33,6 +33,13 @@ Use the keyboard to switch panels, inspect conversations, and review pending
 approval requests. Operations that require App-side signing remain delegated to
 the App approval path.
 
+The client pins SDK revision `78918c088a487a390dedc60bb04e033ca0120e76`.
+Approval rows use the SDK approval list and grant decisions. The retired card
+renderer and its action preflight are removed. Obsolete group ban, invite and
+group-message tombstone helpers, restored-device activation and manual sync import
+are removed as well. Native group invitation support requires a separate client
+flow with the SDK's invitation identifiers.
+
 ## Licensing
 
 Ramflux TUI is licensed under AGPL-3.0-or-later with the Ramflux App Store
