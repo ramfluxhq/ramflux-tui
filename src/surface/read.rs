@@ -44,7 +44,11 @@ pub(crate) fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str, TuiErro
 }
 
 impl Card {
-    fn parse(value: &Value, conversation: &str, reference: &str) -> Result<Self, TuiError> {
+    pub(super) fn parse(
+        value: &Value,
+        conversation: &str,
+        reference: &str,
+    ) -> Result<Self, TuiError> {
         if string(value, "conversation_id")? != conversation
             || string(value, "surface_ref")? != reference
         {
@@ -114,7 +118,7 @@ impl Card {
         Ok(card)
     }
 
-    fn same_revision(&self, other: &Self) -> bool {
+    pub(super) fn same_revision(&self, other: &Self) -> bool {
         self.reference == other.reference
             && self.author == other.author
             && self.conversation == other.conversation

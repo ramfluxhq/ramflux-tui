@@ -185,39 +185,8 @@ impl TuiApp {
         };
         match string(&component, "component")? {
             "Button" => {
-                let request = card.action_request(&component)?;
-                let reference = card.reference.clone();
-                let response = bus
-                    .request(
-                        Some(self.state.account_id.clone()),
-                        "surface",
-                        "surface.action",
-                        serde_json::to_value(&request)?,
-                    )
-                    .await;
-                // Always re-read authority/state after sending, including a stale-state refusal.
-                let reload = self.refresh_cards(bus).await;
-                let result = match &response {
-                    Ok(body) if body.get("accepted").and_then(Value::as_bool) == Some(true) => {
-                        "Action submitted; awaiting agent receipt".into()
-                    }
-                    Ok(body) => format!(
-                        "Action refused: {}",
-                        body.get("reason_code")
-                            .and_then(Value::as_str)
-                            .map_or_else(|| "not accepted".into(), super::render::safe)
-                    ),
-                    Err(_) => {
-                        "Action send failed; delivery is unknown. Refresh before acting again"
-                            .into()
-                    }
-                };
-                self.state.status_message = Some(result.clone());
-                if let Some(card) = self.cards.rows.iter_mut().find(|c| c.reference == reference) {
-                    card.result = Some(result);
-                }
-                response?;
-                reload?;
+                let shown = card.clone();
+                self.submit_card_action(bus, &shown, &component).await?;
             }
             "CheckBox" => {
                 let path = component
@@ -249,6 +218,65 @@ impl TuiApp {
                     ));
             }
         }
+        Ok(())
+    }
+    async fn submit_card_action<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+        shown: &Card,
+        component: &Value,
+    ) -> Result<(), TuiError> {
+        // Content authority may change without a new surface version. Fetch it at activation.
+        let read = bus
+            .request(
+                Some(self.state.account_id.clone()),
+                "surface",
+                "surface.get",
+                json!({"surface_ref":shown.reference}),
+            )
+            .await;
+        let value = match read {
+            Ok(value) => value,
+            Err(error) => {
+                self.cards = super::Cards::default();
+                return Err(error);
+            }
+        };
+        let fresh = Card::parse(&value, &shown.conversation, &shown.reference)?;
+        if !shown.same_revision(&fresh) {
+            self.refresh_cards(bus).await?;
+            return Err(invalid("card changed; review it again before acting"));
+        }
+        let request = shown.action_request(component)?;
+        let reference = shown.reference.clone();
+        let response = bus
+            .request(
+                Some(self.state.account_id.clone()),
+                "surface",
+                "surface.action",
+                serde_json::to_value(&request)?,
+            )
+            .await;
+        // Always re-read authority/state after sending, including a stale-state refusal.
+        let reload = self.refresh_cards(bus).await;
+        let result = match &response {
+            Ok(body) if body.get("accepted").and_then(Value::as_bool) == Some(true) => {
+                "Action submitted; awaiting agent receipt".into()
+            }
+            Ok(body) => format!(
+                "Action refused: {}",
+                body.get("reason_code")
+                    .and_then(Value::as_str)
+                    .map_or_else(|| "not accepted".into(), super::render::safe)
+            ),
+            Err(_) => "Action send failed; delivery is unknown. Refresh before acting again".into(),
+        };
+        self.state.status_message = Some(result.clone());
+        if let Some(card) = self.cards.rows.iter_mut().find(|c| c.reference == reference) {
+            card.result = Some(result);
+        }
+        response?;
+        reload?;
         Ok(())
     }
 }

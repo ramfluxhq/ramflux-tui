@@ -394,7 +394,16 @@ async fn render_and_act_on_native_card(
     );
     assert_eq!(action.surface_hash(), hash, "action must bind the displayed hash");
     bus.surface["render_allowed"] = serde_json::json!(false);
-    app.refresh_cards(bus).await?;
+    let sent_before = bus.requests.iter().filter(|r| r.method == "surface.action").count();
+    assert!(
+        app.handle_input(bus, TuiInput::Enter).await.is_err(),
+        "activation must re-read revoked renderer authority"
+    );
+    assert_eq!(
+        bus.requests.iter().filter(|r| r.method == "surface.action").count(),
+        sent_before,
+        "a stale cached card must not send an action"
+    );
     terminal
         .draw(|frame| app.render(frame))
         .map_err(|error| TuiError::ReadModel(error.to_string()))?;
