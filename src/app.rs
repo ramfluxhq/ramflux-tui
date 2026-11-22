@@ -106,7 +106,7 @@ impl TuiApp {
         input: TuiInput,
     ) -> Result<(), TuiError> {
         if self.cards.open {
-            return self.handle_card_input(bus, input).await;
+            return self.handle_card_input(bus, &input).await;
         }
         if self.state.input_mode == InputMode::Compose {
             return self.handle_compose_input(bus, input).await;

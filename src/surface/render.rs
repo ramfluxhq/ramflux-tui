@@ -76,10 +76,9 @@ impl Card {
 
     fn choices(&self, component: &Value) -> String {
         let selected = component.get("value").and_then(|v| self.value(v));
-        component
-            .get("options")
-            .and_then(Value::as_array)
-            .map(|options| {
+        component.get("options").and_then(Value::as_array).map_or_else(
+            || "[Choices unavailable]".into(),
+            |options| {
                 options
                     .iter()
                     .enumerate()
@@ -97,8 +96,8 @@ impl Card {
                     })
                     .collect::<Vec<_>>()
                     .join("  ")
-            })
-            .unwrap_or_else(|| "[Choices unavailable]".into())
+            },
+        )
     }
 
     fn walk(&self, id: &str, depth: usize, rows: &mut Vec<Row>) {

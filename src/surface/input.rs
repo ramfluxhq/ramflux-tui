@@ -111,7 +111,7 @@ impl TuiApp {
     pub(crate) async fn handle_card_input<B: TuiBus + Send>(
         &mut self,
         bus: &mut B,
-        input: TuiInput,
+        input: &TuiInput,
     ) -> Result<(), TuiError> {
         if self.cards.editing.is_some() {
             return self.edit_card_input(input);
@@ -146,13 +146,13 @@ impl TuiApp {
         Ok(())
     }
 
-    fn edit_card_input(&mut self, input: TuiInput) -> Result<(), TuiError> {
+    fn edit_card_input(&mut self, input: &TuiInput) -> Result<(), TuiError> {
         let Some(text) = self.cards.editing.as_mut() else {
             return Ok(());
         };
         match input {
             TuiInput::ExitCompose => self.cards.editing = None,
-            TuiInput::Char(c) if text.len() + c.len_utf8() <= 4096 => text.push(c),
+            TuiInput::Char(c) if text.len() + c.len_utf8() <= 4096 => text.push(*c),
             TuiInput::EnterCompose if text.len() < 4096 => text.push('i'),
             TuiInput::Quit if text.len() < 4096 => text.push('q'),
             TuiInput::Backspace => {
@@ -259,11 +259,11 @@ fn timestamp() -> Result<String, TuiError> {
         .map_err(protocol)?
         .as_secs();
     // Gregorian civil date from days since Unix epoch; integer arithmetic, UTC only.
-    let days = i64::try_from(seconds / 86400).map_err(protocol)? + 719468;
-    let era = days / 146097;
-    let day_of_era = days - era * 146097;
+    let days = i64::try_from(seconds / 86_400).map_err(protocol)? + 719_468;
+    let era = days / 146_097;
+    let day_of_era = days - era * 146_097;
     let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let mut year = year_of_era + era * 400;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_prime = (5 * day_of_year + 2) / 153;
