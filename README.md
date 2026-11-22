@@ -33,7 +33,7 @@ Use the keyboard to switch panels, inspect conversations, and review pending
 approval requests. Operations that require App-side signing remain delegated to
 the App approval path.
 
-The client pins SDK revision `78918c088a487a390dedc60bb04e033ca0120e76`.
+The client pins SDK revision `540ad51c3c50a4ed57fa2d733217a2341a7755a4`.
 Approval rows use the SDK approval list and grant decisions. The message panel reads native cards with `surface.list` and `surface.get`.
 Press `c` to open cards in the selected conversation, `[` / `]` to switch cards,
 Up/Down to select a control, Enter to edit or act, and Esc to return. Choice inputs

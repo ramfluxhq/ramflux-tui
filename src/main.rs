@@ -41,6 +41,8 @@ async fn run() -> Result<(), TuiError> {
     let cli = Cli::parse();
     let mut bus = SdkLocalBus::connect(&cli.socket).await?;
     let mut app = TuiApp::new(cli.account);
+    app.set_socket(&cli.socket);
+    app.apply_locale_env();
     app.refresh_all(&mut bus).await?;
 
     let mut terminal = setup_terminal()?;
@@ -73,7 +75,8 @@ async fn run_terminal_loop(
         if event::poll(Duration::from_millis(100)).map_err(|error| io_error(&error))?
             && let Event::Key(key) = event::read().map_err(|error| io_error(&error))?
             && key.kind == KeyEventKind::Press
-            && let Some(input) = key_to_input(key.code)
+            && let Some(input) =
+                if app.captures_text() { account_key(key.code) } else { key_to_input(key.code) }
         {
             app.dispatch_input(bus, input).await;
         }
@@ -92,6 +95,16 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     disable_raw_mode().map_err(|error| io_error(&error))?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen).map_err(|error| io_error(&error))?;
     terminal.show_cursor().map_err(|error| io_error(&error))
+}
+
+fn account_key(code: crossterm::event::KeyCode) -> Option<ramflux_cli_pro::TuiInput> {
+    match code {
+        crossterm::event::KeyCode::Enter => Some(ramflux_cli_pro::TuiInput::Enter),
+        crossterm::event::KeyCode::Esc => Some(ramflux_cli_pro::TuiInput::ExitCompose),
+        crossterm::event::KeyCode::Backspace => Some(ramflux_cli_pro::TuiInput::Backspace),
+        crossterm::event::KeyCode::Char(value) => Some(ramflux_cli_pro::TuiInput::Char(value)),
+        _ => None,
+    }
 }
 
 fn io_error(error: &io::Error) -> TuiError {

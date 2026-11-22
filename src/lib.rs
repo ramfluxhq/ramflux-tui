@@ -4,6 +4,7 @@
 mod app;
 mod bus;
 mod error;
+mod i18n;
 mod parsing;
 mod read_model;
 mod state;
