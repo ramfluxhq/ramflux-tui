@@ -99,6 +99,31 @@ impl TuiApp {
         Ok(())
     }
 
+    /// Opens account creation when the daemon has no account. Otherwise loads projections.
+    ///
+    /// The process default account id is the placeholder `default`. Scoping the
+    /// first projection read to that id exits with `AccountNotOpen` before the
+    /// terminal exists. An empty catalog skips those reads and shows creation.
+    ///
+    /// # Errors
+    /// Returns an error when `account.list` fails, or when an existing account's
+    /// projection refresh fails.
+    pub async fn start_session<B: TuiBus + Send>(&mut self, bus: &mut B) -> Result<(), TuiError> {
+        if self.account_catalog_empty(bus).await? {
+            self.begin_create();
+            return Ok(());
+        }
+        self.refresh_all(bus).await
+    }
+
+    async fn account_catalog_empty<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+    ) -> Result<bool, TuiError> {
+        let listed = bus.request(None, "account", "account.list", serde_json::json!({})).await?;
+        Ok(catalog_has_no_account(&listed))
+    }
+
     /// Opens local bus subscriptions used by live refresh.
     ///
     /// # Errors
@@ -1954,4 +1979,23 @@ fn ensure_no_extra_contact_arg(value: Option<&str>, command: &str) -> Result<(),
         ))));
     }
     Ok(())
+}
+
+/// `account.list` with no open id and no stored account is the no-account state.
+/// A missing array counts as empty. A non-array field does not, so a changed
+/// shape still attempts the projection refresh.
+fn catalog_has_no_account(body: &serde_json::Value) -> bool {
+    let active = body.get("active_account_id").and_then(serde_json::Value::as_str);
+    if active.is_some_and(|id| !id.is_empty()) {
+        return false;
+    }
+    field_array_empty(body, "accounts") && field_array_empty(body, "account_details")
+}
+
+fn field_array_empty(body: &serde_json::Value, field: &str) -> bool {
+    match body.get(field) {
+        Some(serde_json::Value::Array(rows)) => rows.is_empty(),
+        Some(_) => false,
+        None => true,
+    }
 }
