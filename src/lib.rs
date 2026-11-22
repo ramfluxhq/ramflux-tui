@@ -8,6 +8,7 @@ mod parsing;
 mod read_model;
 mod state;
 mod stream;
+mod surface;
 #[cfg(test)]
 mod tests;
 
