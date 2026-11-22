@@ -379,7 +379,10 @@ async fn render_and_act_on_native_card(
         .find(|r| r.method == "surface.action")
         .ok_or_else(|| TuiError::ReadModel("test: native action request missing".into()))?;
     let wire = ramflux_protocol::decode_base64url(
-        sent.body.get("wire_base64").and_then(serde_json::Value::as_str).ok_or_else(|| TuiError::ReadModel("test: action wire missing".into()))?,
+        sent.body
+            .get("wire_base64")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| TuiError::ReadModel("test: action wire missing".into()))?,
     )
     .map_err(crate::surface::protocol)?;
     let action = ramflux_protocol::SurfaceAction::from_wire_bytes(&wire)
