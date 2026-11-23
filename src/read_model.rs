@@ -9,12 +9,11 @@
 use ramflux_protocol::message::{self as message, Content};
 use serde_json::{Map, Value};
 
+use crate::i18n::{self, Arg, Key, Locale, LocaleGuard};
 use crate::{AttachmentRow, MessageReceiptRow, MessageRow, TuiError};
 
 /// Contract name carried by every read-model response.
 pub(crate) const READ_MODEL_SCHEMA: &str = "ramflux.message.read_model.v1";
-/// Neutral line for a kind this build cannot render.
-pub(crate) const UNSUPPORTED_MESSAGE: &str = "This message needs a newer version";
 /// Exclusive upper bound for `hlc_ms` (2^53).
 const HLC_MS_LIMIT: u64 = 1 << 53;
 /// Logical counter width of the hybrid clock.
@@ -77,7 +76,8 @@ pub(crate) fn generated_code(error: &TuiError) -> Option<&str> {
 ///
 /// # Errors
 /// Rejects a missing schema, a retired field, a numeric device sequence, or a combined `hlc`.
-pub(crate) fn parse_page(value: &Value) -> Result<ReadModelPage, TuiError> {
+pub(crate) fn parse_page(locale: Locale, value: &Value) -> Result<ReadModelPage, TuiError> {
+    let _guard = LocaleGuard::enter(locale);
     let map = expect_object(value, "page")?;
     reject_retired(map)?;
     require_schema(&req_string(map, "schema")?)?;
@@ -95,12 +95,14 @@ pub(crate) fn parse_page(value: &Value) -> Result<ReadModelPage, TuiError> {
 ///
 /// # Errors
 /// Rejects the same malformed rows as [`parse_page`].
-pub(crate) fn parse_changes(value: &Value) -> Result<ReadModelChanges, TuiError> {
+pub(crate) fn parse_changes(locale: Locale, value: &Value) -> Result<ReadModelChanges, TuiError> {
+    let _guard = LocaleGuard::enter(locale);
     let map = expect_object(value, "changes")?;
     reject_retired(map)?;
     require_schema(&req_string(map, "schema")?)?;
     let conversation_id = req_string(map, "conversation_id")?;
-    let changes = parse_rows(field(map, "changes")?, "change batch")?;
+    let batch = i18n::text(i18n::active(), Key::ChangeBatchWhat);
+    let changes = parse_rows(field(map, "changes")?, batch)?;
     // `snapshot_sequence` is the account journal head. The follow cursor is `next_after`.
     req_u64(map, "snapshot_sequence")?;
     Ok(ReadModelChanges {
@@ -115,38 +117,42 @@ pub(crate) fn parse_changes(value: &Value) -> Result<ReadModelChanges, TuiError>
 ///
 /// # Errors
 /// Returns an error when the cursor encodes the device sequence as a number.
-pub(crate) fn reject_numeric_cursor_sequence(cursor: Option<&Value>) -> Result<(), TuiError> {
+pub(crate) fn reject_numeric_cursor_sequence(
+    locale: Locale,
+    cursor: Option<&Value>,
+) -> Result<(), TuiError> {
+    let _guard = LocaleGuard::enter(locale);
     let Some(object) = cursor.and_then(Value::as_object) else {
         return Ok(());
     };
     for key in ["deviceSequence", "device_sequence"] {
         if object.get(key).is_some_and(Value::is_number) {
-            return Err(invalid("next_before device sequence must be a string"));
+            return Err(invalid(Key::CursorSequenceString));
         }
     }
     Ok(())
 }
 
 fn require_schema(schema: &str) -> Result<(), TuiError> {
-    if schema == READ_MODEL_SCHEMA {
-        Ok(())
-    } else {
-        Err(invalid("schema is not ramflux.message.read_model.v1"))
-    }
+    if schema == READ_MODEL_SCHEMA { Ok(()) } else { Err(invalid(Key::SchemaMismatch)) }
 }
 
-fn invalid(message: impl AsRef<str>) -> TuiError {
-    TuiError::ReadModel(message.as_ref().to_owned())
+fn invalid(key: Key) -> TuiError {
+    TuiError::ReadModel(i18n::text(i18n::active(), key).to_owned())
+}
+
+fn invalid_say(key: Key, fields: &[(&'static str, Arg<'_>)]) -> TuiError {
+    TuiError::ReadModel(i18n::say(i18n::active(), key, fields))
 }
 
 fn expect_object<'a>(value: &'a Value, what: &str) -> Result<&'a Object, TuiError> {
-    value.as_object().ok_or_else(|| invalid(format!("{what} must be an object")))
+    value.as_object().ok_or_else(|| invalid_say(Key::MustBeObject, &[("what", Arg::Text(what))]))
 }
 
 fn reject_retired(map: &Object) -> Result<(), TuiError> {
     for key in RETIRED_FIELDS {
         if map.contains_key(*key) {
-            return Err(invalid(format!("retired field {key}")));
+            return Err(invalid_say(Key::RetiredField, &[("key", Arg::Text(key))]));
         }
     }
     Ok(())
@@ -156,7 +162,8 @@ fn reject_retired(map: &Object) -> Result<(), TuiError> {
 ///
 /// # Errors
 /// Rejects the same malformed message as [`parse_page`].
-pub(crate) fn parse_detail(value: &Value) -> Result<MessageRow, TuiError> {
+pub(crate) fn parse_detail(locale: Locale, value: &Value) -> Result<MessageRow, TuiError> {
+    let _guard = LocaleGuard::enter(locale);
     let map = expect_object(value, "detail")?;
     reject_retired(map)?;
     require_schema(&req_string(map, "schema")?)?;
@@ -165,34 +172,38 @@ pub(crate) fn parse_detail(value: &Value) -> Result<MessageRow, TuiError> {
 }
 
 fn field<'a>(map: &'a Object, key: &str) -> Result<&'a Value, TuiError> {
-    map.get(key).ok_or_else(|| invalid(format!("missing field {key}")))
+    map.get(key).ok_or_else(|| invalid_say(Key::MissingField, &[("key", Arg::Text(key))]))
 }
 
 fn req_string(map: &Object, key: &str) -> Result<String, TuiError> {
     field(map, key)?
         .as_str()
         .map(ToOwned::to_owned)
-        .ok_or_else(|| invalid(format!("{key} must be a string")))
+        .ok_or_else(|| invalid_say(Key::MustBeString, &[("key", Arg::Text(key))]))
 }
 
 fn req_u64(map: &Object, key: &str) -> Result<u64, TuiError> {
-    field(map, key)?.as_u64().ok_or_else(|| invalid(format!("{key} must be an integer")))
+    field(map, key)?
+        .as_u64()
+        .ok_or_else(|| invalid_say(Key::MustBeInteger, &[("key", Arg::Text(key))]))
 }
 
 fn req_u32(map: &Object, key: &str) -> Result<u32, TuiError> {
     let value = req_u64(map, key)?;
-    u32::try_from(value).map_err(|_| invalid(format!("{key} must fit in 32 bits")))
+    u32::try_from(value).map_err(|_| invalid_say(Key::MustFit32, &[("key", Arg::Text(key))]))
 }
 
 fn req_bool(map: &Object, key: &str) -> Result<bool, TuiError> {
-    field(map, key)?.as_bool().ok_or_else(|| invalid(format!("{key} must be a boolean")))
+    field(map, key)?
+        .as_bool()
+        .ok_or_else(|| invalid_say(Key::MustBeBoolean, &[("key", Arg::Text(key))]))
 }
 
 fn opt_string(map: &Object, key: &str) -> Result<Option<String>, TuiError> {
     match map.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(text)) => Ok(Some(text.clone())),
-        Some(_) => Err(invalid(format!("{key} must be a string"))),
+        Some(_) => Err(invalid_say(Key::MustBeString, &[("key", Arg::Text(key))])),
     }
 }
 
@@ -200,7 +211,7 @@ fn optional_object(map: &Object, key: &str) -> Result<Option<Value>, TuiError> {
     match map.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(value @ Value::Object(_)) => Ok(Some(value.clone())),
-        Some(_) => Err(invalid(format!("{key} must be an object"))),
+        Some(_) => Err(invalid_say(Key::MustBeObject, &[("what", Arg::Text(key))])),
     }
 }
 
@@ -208,16 +219,16 @@ fn opt_object<'a>(map: &'a Object, key: &str) -> Result<Option<&'a Object>, TuiE
     match map.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Object(object)) => Ok(Some(object)),
-        Some(_) => Err(invalid(format!("{key} must be an object"))),
+        Some(_) => Err(invalid_say(Key::MustBeObject, &[("what", Arg::Text(key))])),
     }
 }
 
 fn parse_rows(value: &Value, what: &str) -> Result<Vec<MessageRow>, TuiError> {
     let Some(items) = value.as_array() else {
-        return Err(invalid(format!("{what} messages must be an array")));
+        return Err(invalid_say(Key::MessagesMustBeArray, &[("what", Arg::Text(what))]));
     };
     if items.len() > MAX_ROWS {
-        return Err(invalid(format!("{what} has more than {MAX_ROWS} messages")));
+        return Err(invalid_say(Key::TooManyMessages, &[("what", Arg::Text(what))]));
     }
     let mut rows = Vec::new();
     for item in items {
@@ -259,12 +270,12 @@ fn validate_side_fields(map: &Object) -> Result<(), TuiError> {
 
 fn parse_device_sequence(value: &Value) -> Result<String, TuiError> {
     let Some(text) = value.as_str() else {
-        return Err(invalid("device_sequence must be a string, not a number"));
+        return Err(invalid(Key::DeviceSequenceNotNumber));
     };
     if text.len() == 20 && text.bytes().all(|byte| byte.is_ascii_digit()) {
         Ok(text.to_owned())
     } else {
-        Err(invalid("device_sequence must be a 20-digit decimal string"))
+        Err(invalid(Key::DeviceSequenceDigits))
     }
 }
 
@@ -281,16 +292,16 @@ fn parse_author_anchor(map: &Object) -> Result<Option<String>, TuiError> {
 fn validate_group_id(map: &Object) -> Result<(), TuiError> {
     match map.get("group_id") {
         None | Some(Value::Null | Value::String(_)) => Ok(()),
-        Some(_) => Err(invalid("group_id must be a string")),
+        Some(_) => Err(invalid(Key::GroupIdString)),
     }
 }
 
 fn opt_content(map: &Object) -> Result<Option<Content>, TuiError> {
     match map.get("content") {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => serde_json::from_value(value.clone())
-            .map(Some)
-            .map_err(|error| invalid(format!("content: {error}"))),
+        Some(value) => serde_json::from_value(value.clone()).map(Some).map_err(|error| {
+            invalid_say(Key::ContentError, &[("error", Arg::Text(&error.to_string()))])
+        }),
     }
 }
 
@@ -319,7 +330,7 @@ fn validate_reactions(map: &Object) -> Result<(), TuiError> {
         return Ok(());
     };
     let Some(items) = value.as_array() else {
-        return Err(invalid("reactions must be an array"));
+        return Err(invalid(Key::ReactionsArray));
     };
     for item in items {
         let reaction = expect_object(item, "reaction")?;
@@ -334,7 +345,7 @@ fn parse_receipts(map: &Object) -> Result<Vec<MessageReceiptRow>, TuiError> {
         return Ok(Vec::new());
     };
     let Some(items) = value.as_array() else {
-        return Err(invalid("receipts must be an array"));
+        return Err(invalid(Key::ReceiptsArray));
     };
     let mut receipts = Vec::new();
     for item in items {
@@ -357,19 +368,19 @@ fn validate_optional_i64(map: &Object, key: &str) -> Result<(), TuiError> {
     match map.get(key) {
         None | Some(Value::Null) => Ok(()),
         Some(value) if value.as_i64().is_some() => Ok(()),
-        Some(_) => Err(invalid(format!("{key} must be an integer"))),
+        Some(_) => Err(invalid_say(Key::MustBeInteger, &[("key", Arg::Text(key))])),
     }
 }
 
 fn project_row(view: ViewParts) -> Result<MessageRow, TuiError> {
     if view.hlc_ms >= HLC_MS_LIMIT {
-        return Err(invalid("hlc_ms must be below 2^53"));
+        return Err(invalid(Key::HlcMsLimit));
     }
     if view.hlc_logical >= HLC_LOGICAL_LIMIT {
-        return Err(invalid("hlc_logical must fit in 16 bits"));
+        return Err(invalid(Key::HlcLogicalLimit));
     }
     if view.id.is_empty() || view.conversation_id.is_empty() {
-        return Err(invalid("message identity is empty"));
+        return Err(invalid(Key::EmptyIdentity));
     }
     let sender = if view.is_own {
         "me".to_owned()
@@ -407,9 +418,12 @@ fn render_body(
                 .unwrap_or_else(|| "tombstone".to_owned());
             Ok((String::new(), status, Vec::new(), Vec::new()))
         }
-        "unsupported" => {
-            Ok((UNSUPPORTED_MESSAGE.to_owned(), "unsupported".to_owned(), Vec::new(), Vec::new()))
-        }
+        "unsupported" => Ok((
+            i18n::text(i18n::active(), Key::UnsupportedMessage).to_owned(),
+            "unsupported".to_owned(),
+            Vec::new(),
+            Vec::new(),
+        )),
         "content" => {
             let attachments = view
                 .content
@@ -423,7 +437,7 @@ fn render_body(
                 view.receipts.clone(),
             ))
         }
-        _ => Err(invalid("message state is not content, unsupported, or tombstone")),
+        _ => Err(invalid(Key::BadMessageState)),
     }
 }
 
@@ -578,7 +592,7 @@ mod tests {
             "next_before": identity_json,
             "snapshot_sequence": 11
         });
-        let parsed = parse_page(&page)?;
+        let parsed = parse_page(Locale::En, &page)?;
         assert_eq!(parsed.messages[0].body, "你好 🌟");
         assert_eq!(parsed.messages[0].device_sequence, "18446744073709551615");
         assert_eq!(parsed.messages[0].hlc_ms, 1_700_000_000_000);
@@ -597,7 +611,7 @@ mod tests {
             "messages": [numeric],
             "snapshot_sequence": 1
         });
-        assert!(parse_page(&page).is_err());
+        assert!(parse_page(Locale::En, &page).is_err());
 
         let mut combined = sample_message("msg", "conv", "hidden");
         let object = combined
@@ -612,7 +626,7 @@ mod tests {
             "messages": [combined],
             "snapshot_sequence": 1
         });
-        assert!(parse_page(&page).is_err());
+        assert!(parse_page(Locale::En, &page).is_err());
 
         let sniffed = serde_json::json!({
             "messages": [{
@@ -621,7 +635,7 @@ mod tests {
                 "body_utf8": "old body"
             }]
         });
-        assert!(parse_page(&sniffed).is_err());
+        assert!(parse_page(Locale::En, &sniffed).is_err());
 
         let mut retired = sample_message("msg", "conv", "hidden");
         retired["body_utf8"] = serde_json::json!("old body");
@@ -631,7 +645,7 @@ mod tests {
             "messages": [retired],
             "snapshot_sequence": 1
         });
-        assert!(parse_page(&page).is_err());
+        assert!(parse_page(Locale::En, &page).is_err());
         Ok(())
     }
 
@@ -647,7 +661,7 @@ mod tests {
             "snapshot_sequence": 3,
             "page_hint": true
         });
-        let parsed = parse_page(&page)?;
+        let parsed = parse_page(Locale::En, &page)?;
         assert_eq!(parsed.messages[0].body, "hello");
         assert_eq!(parsed.messages[0].sender, "alice");
         Ok(())
@@ -667,7 +681,7 @@ mod tests {
             "messages": [tombstone],
             "snapshot_sequence": 4
         });
-        let parsed = parse_page(&page)?;
+        let parsed = parse_page(Locale::En, &page)?;
         assert_eq!(parsed.messages[0].body, "");
         assert_eq!(parsed.messages[0].attachments, Vec::new());
         assert_eq!(parsed.messages[0].receipts, Vec::new());
@@ -686,8 +700,8 @@ mod tests {
             "messages": [unsupported],
             "snapshot_sequence": 5
         });
-        let parsed = parse_page(&page)?;
-        assert_eq!(parsed.messages[0].body, UNSUPPORTED_MESSAGE);
+        let parsed = parse_page(Locale::En, &page)?;
+        assert_eq!(parsed.messages[0].body, i18n::text(Locale::En, Key::UnsupportedMessage));
         assert!(!parsed.messages[0].body.contains("guess"));
         Ok(())
     }

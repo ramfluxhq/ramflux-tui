@@ -7,6 +7,7 @@ use ramflux_protocol::{SurfaceSnapshot, SurfaceState, canonical_json_bytes};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+use crate::i18n::{self, Arg, Key, Locale};
 use crate::{TuiApp, TuiBus, TuiError};
 
 #[derive(Clone, Debug, Default)]
@@ -31,37 +32,49 @@ pub(crate) struct Card {
     pub(super) result: Option<String>,
 }
 
-pub(crate) fn invalid(message: impl Into<String>) -> TuiError {
-    TuiError::ReadModel(format!("card: {}", message.into()))
+pub(crate) fn invalid(locale: Locale, message: impl Into<String>) -> TuiError {
+    let detail = message.into();
+    TuiError::ReadModel(i18n::say(
+        locale,
+        Key::CardPrefixed,
+        &[("detail", Arg::Text(detail.as_str()))],
+    ))
 }
 
-pub(crate) fn protocol(error: impl std::fmt::Display) -> TuiError {
-    invalid(error.to_string())
+pub(crate) fn protocol(locale: Locale, error: impl std::fmt::Display) -> TuiError {
+    invalid(locale, error.to_string())
 }
 
-pub(crate) fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str, TuiError> {
-    value.get(key).and_then(Value::as_str).ok_or_else(|| invalid(format!("missing {key}")))
+pub(crate) fn string<'a>(locale: Locale, value: &'a Value, key: &str) -> Result<&'a str, TuiError> {
+    value.get(key).and_then(Value::as_str).ok_or_else(|| {
+        invalid(locale, i18n::say(locale, Key::SurfaceMissing, &[("key", Arg::Text(key))]))
+    })
+}
+
+pub(super) fn phrase(locale: Locale, key: Key) -> String {
+    i18n::text(locale, key).to_owned()
 }
 
 impl Card {
     pub(super) fn parse(
+        locale: Locale,
         value: &Value,
         conversation: &str,
         reference: &str,
     ) -> Result<Self, TuiError> {
-        if string(value, "conversation_id")? != conversation
-            || string(value, "surface_ref")? != reference
+        if string(locale, value, "conversation_id")? != conversation
+            || string(locale, value, "surface_ref")? != reference
         {
-            return Err(invalid("surface scope mismatch"));
+            return Err(invalid(locale, phrase(locale, Key::SurfaceScopeMismatch)));
         }
         let mut card = Self {
             reference: reference.into(),
             conversation: conversation.into(),
-            author: string(value, "author_principal_id")?.into(),
+            author: string(locale, value, "author_principal_id")?.into(),
             fallback: value
                 .get("fallback_text")
                 .and_then(Value::as_str)
-                .unwrap_or("Card unavailable")
+                .unwrap_or(i18n::text(locale, Key::CardUnavailable))
                 .into(),
             state: None,
             unavailable: None,
@@ -70,47 +83,56 @@ impl Card {
         };
         // A locally authored snapshot may be readable for planning without renderer authority.
         if value.get("render_allowed").and_then(Value::as_bool) != Some(true) {
-            card.unavailable = Some("Text fallback: this card is not from your own agent".into());
+            card.unavailable = Some(phrase(locale, Key::TextFallback));
             return Ok(card);
         }
         if value.get("snapshot").is_none_or(Value::is_null) {
-            card.unavailable = Some("Card content unavailable".into());
+            card.unavailable = Some(phrase(locale, Key::CardContentUnavailable));
             return Ok(card);
         }
         let snapshot: SurfaceSnapshot = serde_json::from_value(
-            value.get("snapshot").cloned().ok_or_else(|| invalid("missing snapshot"))?,
+            value
+                .get("snapshot")
+                .cloned()
+                .ok_or_else(|| invalid(locale, phrase(locale, Key::MissingSnapshot)))?,
         )?;
         card.fallback.clone_from(&snapshot.fallback_text);
-        if snapshot.surface_id != string(value, "surface_id")? {
-            return Err(invalid("snapshot identity mismatch"));
+        if snapshot.surface_id != string(locale, value, "surface_id")? {
+            return Err(invalid(locale, phrase(locale, Key::SnapshotIdentity)));
         }
         let mut checkpoint = serde_json::to_value(&snapshot)?;
-        checkpoint.as_object_mut().ok_or_else(|| invalid("invalid snapshot"))?.extend([
-            ("conversationId".into(), json!(conversation)),
-            (
-                "surfaceVersion".into(),
-                value.get("version").cloned().ok_or_else(|| invalid("missing version"))?,
-            ),
-        ]);
+        checkpoint
+            .as_object_mut()
+            .ok_or_else(|| invalid(locale, phrase(locale, Key::InvalidSnapshot)))?
+            .extend([
+                ("conversationId".into(), json!(conversation)),
+                (
+                    "surfaceVersion".into(),
+                    value
+                        .get("version")
+                        .cloned()
+                        .ok_or_else(|| invalid(locale, phrase(locale, Key::MissingVersion)))?,
+                ),
+            ]);
         let state = SurfaceState::from_checkpoint_bytes(
-            &canonical_json_bytes(&checkpoint).map_err(protocol)?,
+            &canonical_json_bytes(&checkpoint).map_err(|error| protocol(locale, error))?,
         )
-        .map_err(protocol)?;
+        .map_err(|error| protocol(locale, error))?;
         if state.hash() != value.get("surface_hash").and_then(Value::as_str) {
-            return Err(invalid("snapshot hash mismatch"));
+            return Err(invalid(locale, phrase(locale, Key::SnapshotHash)));
         }
         if state.is_closed() || value.get("closed").and_then(Value::as_bool) != Some(false) {
-            card.unavailable = Some("Card closed".into());
+            card.unavailable = Some(phrase(locale, Key::CardClosed));
         } else if value.get("out_of_sync").and_then(Value::as_bool) != Some(false) {
-            card.unavailable = Some("Card out of sync; actions unavailable".into());
+            card.unavailable = Some(phrase(locale, Key::CardOutOfSync));
         }
         card.result =
             value.get("actions").and_then(Value::as_array).and_then(|actions| actions.last()).map(
                 |action| {
                     if action.get("receipt_verified").and_then(Value::as_bool) == Some(true) {
-                        "Action receipt verified".into()
+                        phrase(locale, Key::ReceiptVerified)
                     } else {
-                        "Action recorded; receipt pending".into()
+                        phrase(locale, Key::ReceiptPending)
                     }
                 },
             );
@@ -177,7 +199,7 @@ impl TuiApp {
                 Ok(())
             }
             Err(error) => {
-                self.cards.notice = Some("Cards could not be loaded; press c to retry".into());
+                self.cards.notice = Some(phrase(self.state.locale, Key::CardsLoadFailed));
                 Err(error)
             }
         }
@@ -189,6 +211,7 @@ impl TuiApp {
         conversation: &str,
     ) -> Result<Cards, TuiError> {
         let mut cards = Cards::default();
+        let locale = self.state.locale;
         let mut cursor = Value::Null;
         // At most 100 explicit content reads; pagination never makes an unbounded loop.
         for _ in 0..10 {
@@ -203,14 +226,14 @@ impl TuiApp {
             let rows = page
                 .get("surfaces")
                 .and_then(Value::as_array)
-                .ok_or_else(|| invalid("invalid surface list"))?;
+                .ok_or_else(|| invalid(locale, phrase(locale, Key::InvalidSurfaceList)))?;
             if rows.len() > 10 {
-                return Err(invalid("surface page too large"));
+                return Err(invalid(locale, phrase(locale, Key::SurfacePageTooLarge)));
             }
             for row in rows {
-                let reference = string(row, "surface_ref")?;
+                let reference = string(locale, row, "surface_ref")?;
                 if cards.rows.iter().any(|card| card.reference == reference) {
-                    return Err(invalid("duplicate surface reference"));
+                    return Err(invalid(locale, phrase(locale, Key::DuplicateSurface)));
                 }
                 let value = bus
                     .request(
@@ -221,7 +244,7 @@ impl TuiApp {
                     )
                     .await?;
                 if !value.is_null() {
-                    cards.rows.push(Card::parse(&value, conversation, reference)?);
+                    cards.rows.push(Card::parse(locale, &value, conversation, reference)?);
                 }
             }
             let next = page.get("next_cursor").cloned().unwrap_or(Value::Null);
@@ -229,11 +252,11 @@ impl TuiApp {
                 return Ok(cards);
             }
             if !next.is_string() || next == cursor {
-                return Err(invalid("surface cursor did not advance"));
+                return Err(invalid(locale, phrase(locale, Key::CursorDidNotAdvance)));
             }
             cursor = next;
         }
-        cards.notice = Some("Showing the first 100 cards in this conversation".into());
+        cards.notice = Some(i18n::say(locale, Key::FirstCards, &[("count", Arg::Count(100))]));
         Ok(cards)
     }
 }

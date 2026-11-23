@@ -356,7 +356,9 @@ async fn render_and_act_on_native_card(
             .and_then(serde_json::Value::as_str)
             .cmp(&b.get("id").and_then(serde_json::Value::as_str))
     });
-    let hash = snapshot.hash().map_err(crate::surface::protocol)?;
+    let hash = snapshot
+        .hash()
+        .map_err(|error| crate::surface::protocol(crate::i18n::Locale::En, error))?;
     bus.surface = serde_json::json!({"surface_ref":"card-ref","conversation_id":crate::DEFAULT_CONVERSATION_ID,
         "surface_id":"note","author_principal_id":"own-agent","render_allowed":true,
         "version":1,"surface_hash":hash,"closed":false,"out_of_sync":false,"fallback_text":"Agent note","snapshot":snapshot});
@@ -384,9 +386,9 @@ async fn render_and_act_on_native_card(
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| TuiError::ReadModel("test: action wire missing".into()))?,
     )
-    .map_err(crate::surface::protocol)?;
+    .map_err(|error| crate::surface::protocol(crate::i18n::Locale::En, error))?;
     let action = ramflux_protocol::SurfaceAction::from_wire_bytes(&wire)
-        .map_err(crate::surface::protocol)?;
+        .map_err(|error| crate::surface::protocol(crate::i18n::Locale::En, error))?;
     assert_eq!(
         action.values().get("note"),
         Some(&serde_json::json!("base!")),
@@ -652,11 +654,14 @@ async fn enter_in_message_panel_submits_plaintext_over_bus() -> Result<(), TuiEr
     assert!(app.state.messages.iter().any(|message| message.body == "typed via tui"));
     assert_eq!(app.state.messages.first().map(|message| message.id.as_str()), Some("msg_sent"));
     assert!(app.state.messages.iter().all(|message| message.id != "client_sent"));
-    let stored = crate::read_model::parse_detail(&crate::read_model::sample_detail(
-        crate::DEFAULT_CONVERSATION_ID,
-        "msg_sent",
-        "from the store",
-    ))?;
+    let stored = crate::read_model::parse_detail(
+        crate::i18n::Locale::En,
+        &crate::read_model::sample_detail(
+            crate::DEFAULT_CONVERSATION_ID,
+            "msg_sent",
+            "from the store",
+        ),
+    )?;
     app.apply_read_model_row(stored);
     let reconciled = app.state.messages.iter().filter(|message| message.id == "msg_sent").count();
     assert_eq!(reconciled, 1);
@@ -943,7 +948,7 @@ async fn object_panel_renders_transfer_progress_and_resumes() -> Result<(), TuiE
     let buffer = buffer_text(&terminal);
     assert!(buffer.contains("object_tui_status"));
     assert!(buffer.contains("in_progress"));
-    assert!(buffer.contains("512/1024 50%"));
+    assert!(buffer.contains("512/1,024 50%"));
 
     app.handle_input(&mut bus, TuiInput::Char('r')).await?;
     assert!(bus.requests.iter().any(|request| {
@@ -1030,11 +1035,16 @@ async fn remote_app_approval_is_visible_and_not_locally_approved() -> Result<(),
         .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
     let buffer = buffer_text(&terminal);
     assert!(buffer.contains("remote_app"));
-    assert!(buffer.contains("remote_app:"));
-    assert!(buffer.contains("App"));
+    assert!(buffer.contains(crate::i18n::text(
+        crate::i18n::Locale::En,
+        crate::i18n::Key::ApprovalRemoteHint
+    )));
 
     app.handle_input(&mut bus, TuiInput::Char('a')).await?;
-    assert_eq!(app.state.status_message.as_deref(), Some("该审批需 App 端签名授权(remote_app)"));
+    assert_eq!(
+        app.state.status_message.as_deref(),
+        Some(crate::i18n::text(crate::i18n::Locale::En, crate::i18n::Key::RemoteAppApproval))
+    );
     assert!(!bus.requests.iter().any(|request| request.method == "grant.approve"));
     Ok(())
 }
@@ -1204,18 +1214,30 @@ async fn decrypted_message_replaces_delivery_placeholder() -> Result<(), TuiErro
 }
 
 fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
-    terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect()
+    let mut text = String::new();
+    let mut covered = 0usize;
+    for cell in terminal.backend().buffer().content() {
+        if covered > 0 {
+            covered -= 1;
+            continue;
+        }
+        let symbol = cell.symbol();
+        text.push_str(symbol);
+        // A wide grapheme occupies the next cell. The backend diff leaves that cell stale.
+        covered = usize::from(symbol.chars().next().is_some_and(is_wide));
+    }
+    text
 }
 
 #[test]
 fn task_messages_render_read_model_text_without_actor_kind_marker()
 -> Result<(), Box<dyn std::error::Error>> {
     let sniffed = serde_json::json!({"messages":[{"message_id":"task-message","sender_id":"agent-device","content_type":"task","actor_kind_verified":false,"body_utf8":"Task done (actor kind unverified)"}]});
-    assert!(crate::read_model::parse_page(&sniffed).is_err());
+    assert!(crate::read_model::parse_page(crate::i18n::Locale::En, &sniffed).is_err());
     let page = crate::read_model::sample_page("conv", "task-message", "Task done");
     let mut app = TuiApp::new("human");
     app.state.selected_panel = Panel::Messages;
-    app.state.messages = crate::read_model::parse_page(&page)?.messages;
+    app.state.messages = crate::read_model::parse_page(crate::i18n::Locale::En, &page)?.messages;
     assert_eq!(app.state.messages.len(), 1);
     let mut terminal = Terminal::new(TestBackend::new(120, 28))?;
     terminal.draw(|frame| app.render(frame))?;
@@ -1243,7 +1265,7 @@ fn target_not_found_removes_only_that_row() {
 fn tombstone_change_replaces_the_cached_body() -> Result<(), TuiError> {
     let mut app = TuiApp::new("alice");
     let page = crate::read_model::sample_page("conv", "msg", "hello");
-    let parsed = crate::read_model::parse_page(&page)?;
+    let parsed = crate::read_model::parse_page(crate::i18n::Locale::En, &page)?;
     let original = parsed
         .messages
         .into_iter()
@@ -1260,7 +1282,7 @@ fn tombstone_change_replaces_the_cached_body() -> Result<(), TuiError> {
         "messages": [tombstone],
         "snapshot_sequence": 12
     });
-    let replacement = crate::read_model::parse_page(&page)?
+    let replacement = crate::read_model::parse_page(crate::i18n::Locale::En, &page)?
         .messages
         .into_iter()
         .next()
@@ -1401,5 +1423,83 @@ async fn revoke_requires_matching_device_and_signed_authority_epoch_before_succe
         assert!(app.revoke_device(&mut bus, "device").await.is_err());
         assert!(app.state.status_message.is_none());
         assert!(!bus.requests.iter().any(|r| r.method == "device.list"));
+    }
+}
+
+#[tokio::test]
+async fn captures_conversation_and_account_screens_in_both_languages() -> Result<(), TuiError> {
+    let mut english_bus = MockBus::default();
+    let mut english = TuiApp::new("alice_account");
+    english.refresh_all(&mut english_bus).await?;
+    let mut terminal = Terminal::new(TestBackend::new(120, 28))
+        .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
+    let conversations = draw(&mut terminal, &english)?;
+    assert!(conversations.contains("Conversations"));
+    assert!(conversations.contains("Default DM"));
+    assert!(conversations.contains("L lock"));
+    emit_capture("en-conversations", &conversations);
+
+    english.handle_input(&mut english_bus, TuiInput::Char('G')).await?;
+    assert_eq!(english.state.locale, crate::i18n::Locale::ZhCn);
+    let toggled = draw(&mut terminal, &english)?;
+    assert!(toggled.contains("会话"));
+    assert!(toggled.contains("L 锁定"));
+    assert!(toggled.contains("Default DM"));
+    english.handle_input(&mut english_bus, TuiInput::Char('G')).await?;
+    assert_eq!(english.state.locale, crate::i18n::Locale::En);
+
+    english.handle_input(&mut english_bus, TuiInput::Char('L')).await?;
+    let account = draw(&mut terminal, &english)?;
+    assert!(account.contains("Account code"));
+    assert!(account.contains("Account locked. Enter the account code."));
+    emit_capture("en-account", &account);
+
+    let mut chinese_bus = MockBus::default();
+    let mut chinese = TuiApp::new("alice_account");
+    chinese.state.locale = crate::i18n::Locale::ZhCn;
+    chinese.refresh_all(&mut chinese_bus).await?;
+    let conversations = draw(&mut terminal, &chinese)?;
+    assert!(conversations.contains("会话"));
+    assert!(conversations.contains("默认私聊"));
+    assert!(conversations.contains("L 锁定"));
+    emit_capture("zh-conversations", &conversations);
+
+    chinese.handle_input(&mut chinese_bus, TuiInput::Char('L')).await?;
+    let account = draw(&mut terminal, &chinese)?;
+    assert!(account.contains("账户口令"));
+    assert!(account.contains("账户已锁定。请输入账户口令。"));
+    emit_capture("zh-account", &account);
+    Ok(())
+}
+
+fn draw(terminal: &mut Terminal<TestBackend>, app: &TuiApp) -> Result<String, TuiError> {
+    terminal
+        .draw(|frame| app.render(frame))
+        .map_err(|error| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(error.to_string())))?;
+    Ok(displayed(terminal))
+}
+
+fn displayed(terminal: &Terminal<TestBackend>) -> String {
+    let raw = buffer_text(terminal);
+    let chars: Vec<char> = raw.chars().collect();
+    let mut text = String::new();
+    for (index, ch) in chars.iter().copied().enumerate() {
+        let between_wide = ch == ' '
+            && chars[..index].iter().copied().rev().find(|item| *item != ' ').is_some_and(is_wide)
+            && chars[index + 1..].iter().copied().find(|item| *item != ' ').is_some_and(is_wide);
+        if !between_wide {
+            text.push(ch);
+        }
+    }
+    text
+}
+
+fn is_wide(ch: char) -> bool {
+    matches!(ch, '\u{3000}'..='\u{303f}' | '\u{3400}'..='\u{9fff}' | '\u{ff00}'..='\u{ffef}')
+}
+
+fn emit_capture(name: &str, text: &str) {
+    if std::env::var_os("RAMFLUX_TUI_CAPTURE").is_some() {
+        println!("-- {name} --\n{text}\n-- end {name} --");
     }
 }

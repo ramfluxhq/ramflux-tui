@@ -4,14 +4,7 @@
 #[path = "account_ui.rs"]
 mod account_ui;
 
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
-use std::fmt::Write as _;
-
-use crate::i18n::{self, Key};
+use crate::i18n::{self, Arg, Key};
 use crate::parsing::{
     parse_approval_row, parse_approvals, parse_contacts, parse_conversations, parse_devices,
     parse_groups, parse_transfer,
@@ -21,6 +14,11 @@ use crate::{
     ConversationRow, DEFAULT_CONVERSATION_ID, InputMode, MessageRow, Panel, PendingAttachment,
     TuiBus, TuiError, TuiInput, TuiState,
 };
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
 
 const DEFAULT_OBJECT_CHUNK_SIZE: usize = 64 * 1024;
 const RELAY_URL_ENV: &str = "RAMFLUX_TUI_RELAY_URL";
@@ -59,11 +57,37 @@ impl TuiApp {
         self.socket = Some(socket.as_ref().to_path_buf());
     }
 
-    /// Applies `RAMFLUX_TUI_LANG` when it is set. Unset stays English.
-    pub fn apply_locale_env(&mut self) {
-        if let Ok(value) = std::env::var("RAMFLUX_TUI_LANG") {
-            self.state.locale = i18n::locale_from_env(&value);
-        }
+    /// Sets the interface language. An explicit tag wins over the process environment.
+    pub fn apply_locale(&mut self, explicit: Option<&str>) {
+        self.state.locale = i18n::resolve_locale(explicit);
+    }
+
+    /// Records a failed stream refresh on the status line.
+    pub fn note_stream_failure(&mut self, error: &TuiError) {
+        let detail = error.to_string();
+        self.note_say(Key::StreamRefreshFailed, &[("error", Arg::Text(detail.as_str()))]);
+    }
+
+    /// Records a reconnect attempt on the status line.
+    pub fn note_reconnecting(&mut self, error: &TuiError) {
+        let detail = error.to_string();
+        self.note_say(Key::Reconnecting, &[("error", Arg::Text(detail.as_str()))]);
+    }
+
+    fn note_text(&mut self, key: Key) {
+        self.state.status_message = Some(i18n::text(self.state.locale, key).to_owned());
+    }
+
+    fn note_say(&mut self, key: Key, fields: &[(&'static str, Arg<'_>)]) {
+        self.state.status_message = Some(i18n::say(self.state.locale, key, fields));
+    }
+
+    fn say(&self, key: Key, fields: &[(&'static str, Arg<'_>)]) -> String {
+        i18n::say(self.state.locale, key, fields)
+    }
+
+    fn text(&self, key: Key) -> &'static str {
+        i18n::text(self.state.locale, key)
     }
 
     /// Account screens capture letters that the normal map treats as commands.
@@ -142,7 +166,8 @@ impl TuiApp {
     /// `status_message` and leaves `should_quit` untouched.
     pub async fn dispatch_input<B: TuiBus + Send>(&mut self, bus: &mut B, input: TuiInput) {
         if let Err(error) = self.handle_input(bus, input).await {
-            self.state.status_message = Some(format!("error: {error}"));
+            let detail = error.to_string();
+            self.note_say(Key::StatusError, &[("detail", Arg::Text(detail.as_str()))]);
         }
     }
 
@@ -206,7 +231,7 @@ impl TuiApp {
                 self.refresh_cards(bus).await?;
                 self.cards.open = !self.cards.rows.is_empty();
                 if !self.cards.open {
-                    self.state.status_message = Some("No cards in this conversation".into());
+                    self.note_text(Key::NoCards);
                 }
             }
             TuiInput::Char('x') if self.state.selected_panel == Panel::Messages => {
@@ -292,13 +317,14 @@ impl TuiApp {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(3), Constraint::Min(10), Constraint::Length(3)])
             .split(area);
+        let locale = self.state.locale;
         let titles = [
-            Panel::Conversations.title(),
-            Panel::Messages.title(),
-            Panel::Objects.title(),
-            Panel::Contacts.title(),
-            Panel::Groups.title(),
-            Panel::Approvals.title(),
+            Panel::Conversations.title(locale),
+            Panel::Messages.title(locale),
+            Panel::Objects.title(locale),
+            Panel::Contacts.title(locale),
+            Panel::Groups.title(locale),
+            Panel::Approvals.title(locale),
         ]
         .into_iter()
         .map(Line::from)
@@ -308,7 +334,12 @@ impl TuiApp {
                 .select(self.state.selected_panel.index())
                 .block(
                     Block::default()
-                        .title(format!("rf tui  {}", i18n::text(self.state.locale, Key::HintKeys)))
+                        .title(
+                            self.say(
+                                Key::TitleBar,
+                                &[("hints", Arg::Text(self.text(Key::HintKeys)))],
+                            ),
+                        )
                         .borders(Borders::ALL),
                 )
                 .highlight_style(Style::default().add_modifier(Modifier::BOLD)),
@@ -321,8 +352,8 @@ impl TuiApp {
         }
         self.render_body(frame, rows[1]);
         let input_title = match self.state.input_mode {
-            InputMode::Compose => "Message input [COMPOSE]",
-            InputMode::Normal => "Message input [NORMAL i=compose]",
+            InputMode::Compose => self.text(Key::InputCompose),
+            InputMode::Normal => self.text(Key::InputNormal),
         };
         let input_text = self.state.status_message.as_ref().map_or_else(
             || self.state.input.clone(),
@@ -354,24 +385,31 @@ impl TuiApp {
             .enumerate()
             .map(|(index, row)| {
                 let marker = if index == self.state.selected_conversation { "> " } else { "  " };
+                let status = i18n::token(self.state.locale, row.status.as_str());
+                let unread = u64::try_from(row.unread).unwrap_or(u64::MAX);
                 ListItem::new(Line::from(vec![
                     Span::raw(marker),
                     Span::raw(row.title.as_str()),
                     Span::raw("  "),
                     Span::raw(row.last_message.as_str()),
-                    Span::raw(format!("  unread={} {}", row.unread, row.status)),
+                    Span::raw(self.say(
+                        Key::UnreadSuffix,
+                        &[("count", Arg::Count(unread)), ("status", Arg::Text(status.as_ref()))],
+                    )),
                 ]))
             })
             .collect::<Vec<_>>();
         frame.render_widget(
-            List::new(items).block(Block::default().title("Conversations").borders(Borders::ALL)),
+            List::new(items).block(
+                Block::default().title(self.text(Key::PanelConversations)).borders(Borders::ALL),
+            ),
             area,
         );
     }
 
     fn render_messages(&self, frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
         if self.cards.open {
-            self.cards.render(frame, area);
+            self.cards.render(frame, area, self.state.locale);
             return;
         }
         let mut lines = self
@@ -381,24 +419,26 @@ impl TuiApp {
             .enumerate()
             .map(|(index, message)| {
                 let marker = if index == self.state.selected_message { "> " } else { "  " };
-                Line::from(format!(
-                    "{marker}{} {}: {} ({}){}",
-                    message.id,
-                    message.sender,
-                    message.body,
-                    message.status,
-                    Self::message_suffix(message)
+                let sender = i18n::token(self.state.locale, message.sender.as_str());
+                let status = i18n::token(self.state.locale, message.status.as_str());
+                let suffix = self.message_suffix(message);
+                Line::from(self.say(
+                    Key::MessageLine,
+                    &[
+                        ("marker", Arg::Text(marker)),
+                        ("id", Arg::Text(message.id.as_str())),
+                        ("sender", Arg::Text(sender.as_ref())),
+                        ("body", Arg::Text(message.body.as_str())),
+                        ("status", Arg::Text(status.as_ref())),
+                        ("suffix", Arg::Text(suffix.as_str())),
+                    ],
                 ))
             })
             .collect::<Vec<_>>();
-        lines.extend(self.cards.summary());
+        lines.extend(self.cards.summary(self.state.locale));
         frame.render_widget(
             Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title("Messages  c=cards  /attach <path> l=delivered r=read x=delete")
-                        .borders(Borders::ALL),
-                )
+                .block(Block::default().title(self.text(Key::MessagesTitle)).borders(Borders::ALL))
                 .wrap(Wrap { trim: false }),
             area,
         );
@@ -412,53 +452,62 @@ impl TuiApp {
             .enumerate()
             .map(|(index, transfer)| {
                 let marker = if index == self.state.selected_object_transfer { "> " } else { "  " };
-                let error = transfer
-                    .last_error
-                    .as_ref()
-                    .map_or_else(String::new, |value| format!(" error={value}"));
-                Line::from(format!(
-                    "{marker}{} {} {} {}/{} {}%{}",
-                    transfer.object_id,
-                    transfer.direction,
-                    transfer.state,
-                    transfer.done_bytes,
-                    transfer.total_bytes,
-                    transfer.percent,
-                    error
+                let direction = i18n::token(self.state.locale, transfer.direction.as_str());
+                let state = i18n::token(self.state.locale, transfer.state.as_str());
+                let done = i18n::format_u64(self.state.locale, transfer.done_bytes);
+                let total = i18n::format_u64(self.state.locale, transfer.total_bytes);
+                let percent = i18n::format_u64(self.state.locale, u64::from(transfer.percent));
+                let error = transfer.last_error.as_ref().map_or_else(String::new, |value| {
+                    self.say(Key::ObjectError, &[("value", Arg::Text(value))])
+                });
+                Line::from(self.say(
+                    Key::ObjectLine,
+                    &[
+                        ("marker", Arg::Text(marker)),
+                        ("id", Arg::Text(transfer.object_id.as_str())),
+                        ("direction", Arg::Text(direction.as_ref())),
+                        ("state", Arg::Text(state.as_ref())),
+                        ("done", Arg::Text(done.as_str())),
+                        ("total", Arg::Text(total.as_str())),
+                        ("percent", Arg::Text(percent.as_str())),
+                        ("error", Arg::Text(error.as_str())),
+                    ],
                 ))
             })
             .collect::<Vec<_>>();
         frame.render_widget(
             Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title("Objects  i=type put/get/status/resume command  s=status r=resume")
-                        .borders(Borders::ALL),
-                )
+                .block(Block::default().title(self.text(Key::ObjectsTitle)).borders(Borders::ALL))
                 .wrap(Wrap { trim: false }),
             area,
         );
     }
 
-    fn message_suffix(message: &MessageRow) -> String {
+    fn message_suffix(&self, message: &MessageRow) -> String {
         let mut suffix = String::new();
         if !message.attachments.is_empty() {
             let summary = message
                 .attachments
                 .iter()
-                .map(|attachment| format!("{}:{}", attachment.object_id, attachment.status))
+                .map(|attachment| {
+                    let status = i18n::token(self.state.locale, attachment.status.as_str());
+                    format!("{}:{status}", attachment.object_id)
+                })
                 .collect::<Vec<_>>()
                 .join(",");
-            let _ = write!(suffix, " attachments=[{summary}]");
+            suffix.push_str(&self.say(Key::AttachmentsSuffix, &[("summary", Arg::Text(&summary))]));
         }
         if !message.receipts.is_empty() {
             let summary = message
                 .receipts
                 .iter()
-                .map(|receipt| format!("{}:{}", receipt.device_id, receipt.state))
+                .map(|receipt| {
+                    let state = i18n::token(self.state.locale, receipt.state.as_str());
+                    format!("{}:{state}", receipt.device_id)
+                })
                 .collect::<Vec<_>>()
                 .join(",");
-            let _ = write!(suffix, " receipts=[{summary}]");
+            suffix.push_str(&self.say(Key::ReceiptsSuffix, &[("summary", Arg::Text(&summary))]));
         }
         suffix
     }
@@ -477,32 +526,40 @@ impl TuiApp {
                 } else {
                     contact.safety_number.join(" ")
                 };
-                ListItem::new(format!(
-                    "{marker}{} {} -> {} {} verify={} fp={} sn={safety_number}",
-                    contact.link_id,
-                    contact.requester,
-                    contact.target,
-                    contact.state,
-                    contact.verification_state,
-                    safety
+                let state = i18n::token(self.state.locale, contact.state.as_str());
+                let verification =
+                    i18n::token(self.state.locale, contact.verification_state.as_str());
+                ListItem::new(self.say(
+                    Key::ContactLine,
+                    &[
+                        ("marker", Arg::Text(marker)),
+                        ("link", Arg::Text(contact.link_id.as_str())),
+                        ("requester", Arg::Text(contact.requester.as_str())),
+                        ("target", Arg::Text(contact.target.as_str())),
+                        ("state", Arg::Text(state.as_ref())),
+                        ("verification", Arg::Text(verification.as_ref())),
+                        ("fingerprint", Arg::Text(safety)),
+                        ("safety", Arg::Text(safety_number.as_str())),
+                    ],
                 ))
             })
             .collect::<Vec<_>>();
         items.extend(self.state.devices.iter().map(|device| {
             let marker = if device.is_local { "* " } else { "  " };
-            ListItem::new(format!(
-                "{marker}device {} epoch={} target={}",
-                device.device_id, device.device_epoch, device.target_delivery_id
+            let epoch = i18n::format_u64(self.state.locale, device.device_epoch);
+            ListItem::new(self.say(
+                Key::DeviceLine,
+                &[
+                    ("marker", Arg::Text(marker)),
+                    ("id", Arg::Text(device.device_id.as_str())),
+                    ("epoch", Arg::Text(epoch.as_str())),
+                    ("target", Arg::Text(device.target_delivery_id.as_str())),
+                ],
             ))
         }));
         frame.render_widget(
-            List::new(items).block(
-                Block::default()
-                    .title(
-                        "Contacts/Devices  i=type add/switch/accept then Enter  S=safety V=verify",
-                    )
-                    .borders(Borders::ALL),
-            ),
+            List::new(items)
+                .block(Block::default().title(self.text(Key::ContactsTitle)).borders(Borders::ALL)),
             area,
         );
     }
@@ -515,21 +572,25 @@ impl TuiApp {
             .enumerate()
             .map(|(index, group)| {
                 let marker = if index == self.state.selected_group { "> " } else { "  " };
-                ListItem::new(format!(
-                    "{marker}{} members={} disappearing={:?} mute_until={:?}",
-                    group.id,
-                    group.members.join(","),
-                    group.disappearing_ttl_secs,
-                    group.mute_until
+                let members = group.members.join(",");
+                let none = self.text(Key::NoneValue);
+                let disappearing = group.disappearing_ttl_secs.map_or(Arg::Text(none), Arg::Int);
+                let mute = group.mute_until.map_or(Arg::Text(none), Arg::Secs);
+                ListItem::new(self.say(
+                    Key::GroupLine,
+                    &[
+                        ("marker", Arg::Text(marker)),
+                        ("id", Arg::Text(group.id.as_str())),
+                        ("members", Arg::Text(members.as_str())),
+                        ("disappearing", disappearing),
+                        ("mute", mute),
+                    ],
                 ))
             })
             .collect::<Vec<_>>();
         frame.render_widget(
-            List::new(items).block(
-                Block::default()
-                    .title("Groups  m=mute u=unmute e=disappearing")
-                    .borders(Borders::ALL),
-            ),
+            List::new(items)
+                .block(Block::default().title(self.text(Key::GroupsTitle)).borders(Borders::ALL)),
             area,
         );
     }
@@ -542,30 +603,35 @@ impl TuiApp {
             .enumerate()
             .map(|(index, item)| {
                 let marker = if index == self.state.selected_approval { "> " } else { "  " };
-                Line::from(format!(
-                    "{marker}{} {} risk={} mode={} {} {}",
-                    item.id,
-                    item.tool,
-                    item.risk,
-                    item.confirmation_mode,
-                    item.status,
-                    Self::approval_action_hint(item)
+                let status = i18n::token(self.state.locale, item.status.as_str());
+                let hint = self.approval_action_hint(item);
+                Line::from(self.say(
+                    Key::ApprovalLine,
+                    &[
+                        ("marker", Arg::Text(marker)),
+                        ("id", Arg::Text(item.id.as_str())),
+                        ("tool", Arg::Text(item.tool.as_str())),
+                        ("risk", Arg::Text(item.risk.as_str())),
+                        ("mode", Arg::Text(item.confirmation_mode.as_str())),
+                        ("status", Arg::Text(status.as_ref())),
+                        ("hint", Arg::Text(hint)),
+                    ],
                 ))
             })
             .collect::<Vec<_>>();
         frame.render_widget(
             Paragraph::new(lines)
-                .block(Block::default().title("Approvals  a=approve d=deny").borders(Borders::ALL))
+                .block(Block::default().title(self.text(Key::ApprovalsTitle)).borders(Borders::ALL))
                 .wrap(Wrap { trim: false }),
             area,
         );
     }
 
-    fn approval_action_hint(item: &crate::ApprovalRow) -> &'static str {
+    fn approval_action_hint(&self, item: &crate::ApprovalRow) -> &'static str {
         if item.confirmation_mode == "remote_app" {
-            "remote_app: 需 App 签名"
+            self.text(Key::ApprovalRemoteHint)
         } else {
-            "a=approve"
+            self.text(Key::ApprovalApprove)
         }
     }
 
@@ -619,11 +685,11 @@ impl TuiApp {
                 }),
             )
             .await?;
-        let page = read_model::parse_page(&response)?;
+        let page = read_model::parse_page(self.state.locale, &response)?;
         if page.conversation_id != conversation_id {
-            return Err(TuiError::ReadModel("conversation_id mismatch".to_owned()));
+            return Err(TuiError::ReadModel(self.text(Key::ConversationMismatch).to_owned()));
         }
-        read_model::reject_numeric_cursor_sequence(page.next_before.as_ref())?;
+        read_model::reject_numeric_cursor_sequence(self.state.locale, page.next_before.as_ref())?;
         self.state.messages = page.messages;
         self.stream_cursors.insert(self.state.account_id.clone(), page.snapshot_sequence);
         self.refresh_cards(bus).await?;
@@ -712,11 +778,11 @@ impl TuiApp {
         method: &str,
     ) -> Result<(), TuiError> {
         let Some(approval) = self.state.approvals.get(self.state.selected_approval).cloned() else {
-            self.state.status_message = Some("no approval selected".to_owned());
+            self.note_text(Key::NoApproval);
             return Ok(());
         };
         if method == "grant.approve" && approval.confirmation_mode == "remote_app" {
-            self.state.status_message = Some("该审批需 App 端签名授权(remote_app)".to_owned());
+            self.note_text(Key::RemoteAppApproval);
             return Ok(());
         }
         bus.request(
@@ -735,22 +801,17 @@ impl TuiApp {
         bus: &mut B,
     ) -> Result<(), TuiError> {
         if self.state.selected_panel != Panel::Messages || self.state.input.is_empty() {
-            self.state.status_message = Some("nothing to send".to_owned());
+            self.note_text(Key::NothingToSend);
             return Ok(());
         }
         let body = std::mem::take(&mut self.state.input);
         if let Some(_path) = body.strip_prefix("/attach ") {
-            self.state.status_message = Some(
-                "conversation.send does not accept attachment bytes; use the object panel"
-                    .to_owned(),
-            );
+            // ui-allow: command syntax
+            self.note_text(Key::AttachRefused);
             return Ok(());
         }
         if !self.state.pending_attachments.is_empty() {
-            self.state.status_message = Some(
-                "queued attachment bytes were not sent; open the object panel to send the file"
-                    .to_owned(),
-            );
+            self.note_text(Key::AttachmentNotSent);
         }
         let conversation_id = self
             .selected_conversation()
@@ -758,7 +819,7 @@ impl TuiApp {
         let operation_id = format!("tui-{}-{}", self.state.account_id, self.state.next_message_id);
         self.state.next_message_id = self.state.next_message_id.saturating_add(1);
         if operation_id.len() > 256 {
-            return Err(TuiError::ReadModel("operation_id is longer than 256 bytes".to_owned()));
+            return Err(TuiError::ReadModel(self.text(Key::OpIdTooLong).to_owned()));
         }
         let response = bus
             .request_operation(
@@ -802,18 +863,19 @@ impl TuiApp {
             )
             .await?;
         let epoch = response["device_set_epoch"].as_u64().filter(|e| *e > 0).ok_or_else(|| {
-            TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(
-                "signed device-set epoch missing from revoke acknowledgement".into(),
-            ))
+            TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(self.text(Key::EpochMissing).to_owned()))
         })?;
         if response["revoked"] != true || response["device_id"] != device_id {
             return Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(
-                "device revoke acknowledgement mismatch".into(),
+                self.text(Key::RevokeMismatch).to_owned(),
             )));
         }
         self.refresh_devices(bus).await?;
-        self.state.status_message =
-            Some(format!("Revocation submitted for {device_id} (signed device-set epoch {epoch})"));
+        let epoch_text = i18n::format_u64(self.state.locale, epoch);
+        self.note_say(
+            Key::RevocationSubmitted,
+            &[("device", Arg::Text(device_id)), ("epoch", Arg::Text(epoch_text.as_str()))],
+        );
         Ok(())
     }
 
@@ -850,7 +912,7 @@ impl TuiApp {
         object_id: impl Into<String>,
         plaintext: &[u8],
     ) -> Result<(), TuiError> {
-        let relay_endpoint = Self::relay_endpoint()?;
+        let relay_endpoint = self.relay_endpoint()?;
         self.queue_attachment_bytes_for_relay(
             object_id,
             plaintext,
@@ -875,8 +937,8 @@ impl TuiApp {
             relay_endpoint: relay_endpoint.into(),
             relay_service_key_base64,
         });
-        self.state.status_message =
-            Some(format!("queued attachment count={}", self.state.pending_attachments.len()));
+        let count = u64::try_from(self.state.pending_attachments.len()).unwrap_or(u64::MAX);
+        self.note_say(Key::QueuedAttachments, &[("count", Arg::Count(count))]);
     }
 
     /// Queues a file attachment for the next direct message.
@@ -911,8 +973,7 @@ impl TuiApp {
                 self.resume_transfer(bus, object_id, direction).await?;
             }
             _ => {
-                self.state.status_message =
-                    Some("object command: put <path> <object_id> | get <object_id> <out> | status <object_id> [direction] | resume <object_id> <direction>".to_owned());
+                self.note_text(Key::ObjectUsage);
             }
         }
         Ok(())
@@ -939,7 +1000,7 @@ impl TuiApp {
                     "object_id": object_id,
                     "plaintext_base64": ramflux_protocol::encode_base64url(&bytes),
                     "chunk_size": DEFAULT_OBJECT_CHUNK_SIZE,
-                    "relay_endpoint": Self::relay_endpoint().ok(),
+                    "relay_endpoint": self.relay_endpoint().ok(),
                     "relay_service_key_base64": Self::relay_service_key_base64(),
                 }),
             )
@@ -964,7 +1025,7 @@ impl TuiApp {
                 "object.get",
                 serde_json::json!({
                     "object_id": object_id,
-                    "relay_endpoint": Self::relay_endpoint().ok(),
+                    "relay_endpoint": self.relay_endpoint().ok(),
                     "relay_service_key_base64": Self::relay_service_key_base64(),
                     "relay_ack": true,
                 }),
@@ -972,7 +1033,7 @@ impl TuiApp {
             .await?;
         self.refresh_object_status(bus, object_id, Some("download")).await?;
         if response.get("plaintext_base64").is_some() {
-            self.state.status_message = Some(format!("downloaded object {object_id}"));
+            self.note_say(Key::DownloadedObject, &[("object_id", Arg::Text(object_id))]);
         }
         Ok(())
     }
@@ -1010,7 +1071,7 @@ impl TuiApp {
         let Some(row) =
             self.state.object_transfers.get(self.state.selected_object_transfer).cloned()
         else {
-            self.state.status_message = Some("no object transfer selected".to_owned());
+            self.note_text(Key::NoTransfer);
             return Ok(());
         };
         self.refresh_object_status(bus, &row.object_id, Some(&row.direction)).await
@@ -1027,7 +1088,7 @@ impl TuiApp {
         let Some(row) =
             self.state.object_transfers.get(self.state.selected_object_transfer).cloned()
         else {
-            self.state.status_message = Some("no object transfer selected".to_owned());
+            self.note_text(Key::NoTransfer);
             return Ok(());
         };
         self.resume_transfer_with_relay(
@@ -1036,7 +1097,7 @@ impl TuiApp {
             &row.direction,
             row.relay_endpoint.as_deref().ok_or_else(|| {
                 TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(
-                    "selected transfer is missing relay endpoint".to_owned(),
+                    self.text(Key::MissingRelay).to_owned(),
                 ))
             })?,
             row.relay_service_key_base64.clone(),
@@ -1058,7 +1119,7 @@ impl TuiApp {
             bus,
             object_id,
             direction,
-            &Self::relay_endpoint()?,
+            &self.relay_endpoint()?,
             Self::relay_service_key_base64(),
         )
         .await
@@ -1098,7 +1159,7 @@ impl TuiApp {
         bus: &mut B,
     ) -> Result<(), TuiError> {
         let Some(contact) = self.state.contacts.get(self.state.selected_contact).cloned() else {
-            self.state.status_message = Some("no contact selected".to_owned());
+            self.note_text(Key::NoContact);
             return Ok(());
         };
         let response = bus
@@ -1122,14 +1183,11 @@ impl TuiApp {
         bus: &mut B,
     ) -> Result<(), TuiError> {
         let Some(contact) = self.state.contacts.get(self.state.selected_contact).cloned() else {
-            self.state.status_message = Some("no contact selected".to_owned());
+            self.note_text(Key::NoContact);
             return Ok(());
         };
         if contact.safety_number.is_empty() {
-            self.state.status_message = Some(
-                "refusing blind verify: press S to load the safety number, then compare all 60 digits out-of-band before verifying"
-                    .to_owned(),
-            );
+            self.note_text(Key::BlindVerify);
             return Ok(());
         }
         let response = bus
@@ -1141,7 +1199,7 @@ impl TuiApp {
             )
             .await?;
         self.apply_contact_safety_response(&response);
-        self.state.status_message = Some("contact verified".to_owned());
+        self.note_text(Key::ContactVerified);
         Ok(())
     }
 
@@ -1157,33 +1215,60 @@ impl TuiApp {
         let mut parts = command.split_whitespace();
         match parts.next() {
             Some("add") => {
-                let link_id = required_contact_arg(parts.next(), "contact add link_id")?;
-                let requester_id =
-                    required_contact_arg(parts.next(), "contact add requester commitment")?;
+                let locale = self.state.locale;
+                let link_id =
+                    required_contact_arg(locale, parts.next(), self.text(Key::ContactAddLink))?;
+                let requester_id = required_contact_arg(
+                    locale,
+                    parts.next(),
+                    self.text(Key::ContactAddRequester),
+                )?;
                 let target_id =
-                    required_contact_arg(parts.next(), "contact add target commitment")?;
-                ensure_no_extra_contact_arg(parts.next(), "contact add")?;
+                    required_contact_arg(locale, parts.next(), self.text(Key::ContactAddTarget))?;
+                ensure_no_extra_contact_arg(
+                    locale,
+                    parts.next(),
+                    self.text(Key::ContactAddCommand),
+                )?;
                 self.add_contact(bus, link_id, requester_id, target_id).await?;
             }
             Some("accept") => {
-                let link_id = required_contact_arg(parts.next(), "contact accept link_id")?;
-                let requester_id =
-                    required_contact_arg(parts.next(), "contact accept requester commitment")?;
-                let target_id =
-                    required_contact_arg(parts.next(), "contact accept target commitment")?;
-                ensure_no_extra_contact_arg(parts.next(), "contact accept")?;
+                let locale = self.state.locale;
+                let link_id =
+                    required_contact_arg(locale, parts.next(), self.text(Key::ContactAcceptLink))?;
+                let requester_id = required_contact_arg(
+                    locale,
+                    parts.next(),
+                    self.text(Key::ContactAcceptRequester),
+                )?;
+                let target_id = required_contact_arg(
+                    locale,
+                    parts.next(),
+                    self.text(Key::ContactAcceptTarget),
+                )?;
+                ensure_no_extra_contact_arg(
+                    locale,
+                    parts.next(),
+                    self.text(Key::ContactAcceptCommand),
+                )?;
                 self.accept_contact(bus, link_id, requester_id, target_id).await?;
             }
             Some("switch") => {
-                let account_id = required_contact_arg(parts.next(), "account switch account_id")?;
-                ensure_no_extra_contact_arg(parts.next(), "account switch")?;
+                let locale = self.state.locale;
+                let account_id =
+                    required_contact_arg(locale, parts.next(), self.text(Key::AccountSwitchId))?;
+                ensure_no_extra_contact_arg(
+                    locale,
+                    parts.next(),
+                    self.text(Key::AccountSwitchCommand),
+                )?;
                 self.switch_account(bus, account_id).await?;
             }
             Some(other) => {
-                self.state.status_message = Some(format!("unknown command: {other}"));
+                self.note_say(Key::UnknownCommand, &[("command", Arg::Text(other))]);
             }
             None => {
-                self.state.status_message = Some("no command entered".to_owned());
+                self.note_text(Key::NoCommand);
             }
         }
         Ok(())
@@ -1212,7 +1297,7 @@ impl TuiApp {
         )
         .await?;
         self.refresh_contacts(bus).await?;
-        self.state.status_message = Some(format!("contact added: {link_id}"));
+        self.note_say(Key::ContactAdded, &[("link_id", Arg::Text(link_id))]);
         Ok(())
     }
 
@@ -1239,7 +1324,7 @@ impl TuiApp {
         )
         .await?;
         self.refresh_contacts(bus).await?;
-        self.state.status_message = Some(format!("contact accepted: {link_id}"));
+        self.note_say(Key::ContactAccepted, &[("link_id", Arg::Text(link_id))]);
         Ok(())
     }
 
@@ -1272,7 +1357,7 @@ impl TuiApp {
         self.state.selected_message = 0;
         self.state.selected_contact = 0;
         self.state.selected_group = 0;
-        self.state.status_message = Some(format!("active account: {active_account_id}"));
+        self.note_say(Key::ActiveAccount, &[("account", Arg::Text(active_account_id))]);
         self.refresh_all(bus).await?;
         Ok(())
     }
@@ -1286,7 +1371,7 @@ impl TuiApp {
         bus: &mut B,
     ) -> Result<(), TuiError> {
         let Some(message) = self.state.messages.get(self.state.selected_message).cloned() else {
-            self.state.status_message = Some("no message selected".to_owned());
+            self.note_text(Key::NoMessage);
             return Ok(());
         };
         let conversation_id = self
@@ -1317,7 +1402,7 @@ impl TuiApp {
         bus: &mut B,
     ) -> Result<(), TuiError> {
         let Some(message) = self.state.messages.get(self.state.selected_message).cloned() else {
-            self.state.status_message = Some("no message selected".to_owned());
+            self.note_text(Key::NoMessage);
             return Ok(());
         };
         let conversation = self.selected_conversation();
@@ -1357,7 +1442,7 @@ impl TuiApp {
         bus: &mut B,
     ) -> Result<(), TuiError> {
         let Some(message) = self.state.messages.get(self.state.selected_message).cloned() else {
-            self.state.status_message = Some("no message selected".to_owned());
+            self.note_text(Key::NoMessage);
             return Ok(());
         };
         let conversation = self.selected_conversation();
@@ -1524,7 +1609,7 @@ impl TuiApp {
         ttl_secs: i64,
     ) -> Result<(), TuiError> {
         let Some(group) = self.state.groups.get(self.state.selected_group).cloned() else {
-            self.state.status_message = Some("no group selected".to_owned());
+            self.note_text(Key::NoGroup);
             return Ok(());
         };
         let response = bus
@@ -1575,7 +1660,7 @@ impl TuiApp {
         unmute: bool,
     ) -> Result<(), TuiError> {
         let Some(group) = self.state.groups.get(self.state.selected_group).cloned() else {
-            self.state.status_message = Some("no group selected".to_owned());
+            self.note_text(Key::NoGroup);
             return Ok(());
         };
         let response = bus
@@ -1635,7 +1720,7 @@ impl TuiApp {
             self.state.messages.first().map_or_else(String::new, |message| message.body.clone());
         self.state.conversations.push(ConversationRow {
             id: DEFAULT_CONVERSATION_ID.to_owned(),
-            title: "Default DM".to_owned(),
+            title: self.text(Key::DefaultDm).to_owned(),
             last_message,
             unread: 0,
             status: "synced".to_owned(),
@@ -1756,9 +1841,9 @@ impl TuiApp {
                     return self.handle_change_error(bus, &body, message_hint, error).await;
                 }
             };
-            let batch = read_model::parse_changes(&response)?;
+            let batch = read_model::parse_changes(self.state.locale, &response)?;
             if batch.conversation_id != conversation_id {
-                return Err(TuiError::ReadModel("conversation_id mismatch".to_owned()));
+                return Err(TuiError::ReadModel(self.text(Key::ConversationMismatch).to_owned()));
             }
             for row in batch.changes {
                 self.apply_read_model_row(row);
@@ -1768,8 +1853,7 @@ impl TuiApp {
                 return Ok(false);
             }
         }
-        self.state.status_message =
-            Some("message change batch stopped at the round limit".to_owned());
+        self.note_text(Key::ChangeBatchLimit);
         Ok(false)
     }
 
@@ -1834,7 +1918,7 @@ impl TuiApp {
                 }),
             )
             .await?;
-        self.apply_read_model_row(read_model::parse_detail(&response)?);
+        self.apply_read_model_row(read_model::parse_detail(self.state.locale, &response)?);
         Ok(())
     }
 
@@ -1888,7 +1972,7 @@ impl TuiApp {
             return;
         };
         if transfer.relay_endpoint.is_none() {
-            transfer.relay_endpoint = Self::relay_endpoint().ok();
+            transfer.relay_endpoint = self.relay_endpoint().ok();
         }
         if transfer.relay_service_key_base64.is_none() {
             transfer.relay_service_key_base64 = Self::relay_service_key_base64();
@@ -1904,11 +1988,11 @@ impl TuiApp {
         }
     }
 
-    fn relay_endpoint() -> Result<String, TuiError> {
+    fn relay_endpoint(&self) -> Result<String, TuiError> {
         std::env::var(RELAY_URL_ENV).map_err(|_| {
-            TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(format!(
-                "missing {RELAY_URL_ENV} for relay object transfer"
-            )))
+            TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(
+                self.say(Key::MissingRelayEnv, &[("name", Arg::Text(RELAY_URL_ENV))]),
+            ))
         })
     }
 
@@ -1968,14 +2052,30 @@ impl TuiApp {
     }
 }
 
-fn required_contact_arg<'a>(value: Option<&'a str>, label: &str) -> Result<&'a str, TuiError> {
-    value.ok_or_else(|| TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(format!("missing {label}"))))
+fn required_contact_arg<'a>(
+    locale: crate::i18n::Locale,
+    value: Option<&'a str>,
+    label: &str,
+) -> Result<&'a str, TuiError> {
+    value.ok_or_else(|| {
+        TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(i18n::say(
+            locale,
+            Key::MissingArg,
+            &[("label", Arg::Text(label))],
+        )))
+    })
 }
 
-fn ensure_no_extra_contact_arg(value: Option<&str>, command: &str) -> Result<(), TuiError> {
+fn ensure_no_extra_contact_arg(
+    locale: crate::i18n::Locale,
+    value: Option<&str>,
+    command: &str,
+) -> Result<(), TuiError> {
     if let Some(extra) = value {
-        return Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(format!(
-            "unexpected {command} argument: {extra}"
+        return Err(TuiError::Sdk(ramflux_sdk::SdkError::LocalBus(i18n::say(
+            locale,
+            Key::UnexpectedArg,
+            &[("command", Arg::Text(command)), ("extra", Arg::Text(extra))],
         ))));
     }
     Ok(())

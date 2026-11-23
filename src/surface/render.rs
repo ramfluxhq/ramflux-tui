@@ -3,6 +3,7 @@
 
 //! Bounded terminal projection. Unsupported declarations never become executable controls.
 use super::{Card, Cards};
+use crate::i18n::{self, Arg, Key, Locale, LocaleGuard};
 use ramflux_protocol::JsonPointer;
 use ratatui::{
     Frame,
@@ -15,6 +16,16 @@ use serde_json::Value;
 pub(super) struct Row {
     pub text: String,
     pub control: Option<Value>,
+}
+
+fn shown_number(locale: Locale, number: &serde_json::Number) -> String {
+    if let Some(value) = number.as_i64() {
+        return i18n::format_i64(locale, value);
+    }
+    if let Some(value) = number.as_u64() {
+        return i18n::format_u64(locale, value);
+    }
+    number.to_string()
 }
 
 pub(super) fn safe(text: &str) -> String {
@@ -38,11 +49,14 @@ impl Card {
     }
 
     fn text(&self, value: Option<&Value>) -> String {
+        let locale = i18n::active();
         match value.and_then(|v| self.value(v)) {
             Some(Value::String(text)) => safe(&text),
-            Some(Value::Number(number)) => number.to_string(),
-            Some(Value::Bool(value)) => value.to_string(),
-            _ => "[Unsupported display value]".into(),
+            Some(Value::Number(number)) => shown_number(locale, &number),
+            Some(Value::Bool(value)) => {
+                i18n::text(locale, if value { Key::BoolTrue } else { Key::BoolFalse }).to_owned()
+            }
+            _ => i18n::text(locale, Key::UnsupportedValue).to_owned(),
         }
     }
 
@@ -51,7 +65,10 @@ impl Card {
             .get("child")
             .and_then(Value::as_str)
             .and_then(|id| self.component(id))
-            .map_or_else(|| "Button".into(), |child| self.text(child.get("text")))
+            .map_or_else(
+                || i18n::text(i18n::active(), Key::ButtonLabel).to_owned(),
+                |child| self.text(child.get("text")),
+            )
     }
 
     fn component(&self, id: &str) -> Option<&Value> {
@@ -63,7 +80,8 @@ impl Card {
             .find(|c| c.get("id").and_then(Value::as_str) == Some(id))
     }
 
-    pub(super) fn rows(&self) -> Vec<Row> {
+    pub(super) fn rows(&self, locale: Locale) -> Vec<Row> {
+        let _guard = LocaleGuard::enter(locale);
         let mut rows = Vec::new();
         if self.state.is_some() {
             self.walk("root", 0, &mut rows);
@@ -77,7 +95,7 @@ impl Card {
     fn choices(&self, component: &Value) -> String {
         let selected = component.get("value").and_then(|v| self.value(v));
         component.get("options").and_then(Value::as_array).map_or_else(
-            || "[Choices unavailable]".into(),
+            || i18n::text(i18n::active(), Key::ChoicesUnavailable).to_owned(),
             |options| {
                 options
                     .iter()
@@ -87,11 +105,20 @@ impl Card {
                             .as_ref()
                             .and_then(Value::as_array)
                             .is_some_and(|a| option.get("value").is_some_and(|v| a.contains(v)));
-                        format!(
-                            "{}. {} {}",
-                            index + 1,
-                            if checked { "[x]" } else { "[ ]" },
-                            self.text(option.get("label"))
+                        let mark = if checked { "[x]" } else { "[ ]" };
+                        let label = self.text(option.get("label"));
+                        let position = i18n::format_u64(
+                            i18n::active(),
+                            u64::try_from(index.saturating_add(1)).unwrap_or(u64::MAX),
+                        );
+                        i18n::say(
+                            i18n::active(),
+                            Key::ChoiceItem,
+                            &[
+                                ("index", Arg::Text(position.as_str())),
+                                ("mark", Arg::Text(mark)),
+                                ("label", Arg::Text(label.as_str())),
+                            ],
                         )
                     })
                     .collect::<Vec<_>>()
@@ -111,15 +138,21 @@ impl Card {
         let mut control = None;
         let text = match kind {
             "Text" => self.text(component.get("text")),
-            "Divider" => "────────────────".into(),
+            "Divider" => i18n::text(i18n::active(), Key::Divider).to_owned(),
             "Row" | "Column" | "List" | "Card" => String::new(),
             "Button" if component.pointer("/action/event").is_some() => {
                 control = Some(component.clone());
-                format!("[ {} ]", self.label(component))
+                i18n::say(
+                    i18n::active(),
+                    Key::ButtonChrome,
+                    &[("label", Arg::Text(&self.label(component)))],
+                )
             }
-            "Button" => {
-                format!("[{}: link/function unavailable in this terminal]", self.label(component))
-            }
+            "Button" => i18n::say(
+                i18n::active(),
+                Key::LinkUnavailable,
+                &[("label", Arg::Text(&self.label(component)))],
+            ),
             "TextField" | "DateTimeInput" | "Slider" | "CheckBox" | "ChoicePicker" => {
                 if component.pointer("/value/@path").is_some() {
                     control = Some(component.clone());
@@ -130,9 +163,17 @@ impl Card {
                 } else {
                     self.text(component.get("value"))
                 };
-                format!("{label}: {value}")
+                i18n::say(
+                    i18n::active(),
+                    Key::FieldLine,
+                    &[("label", Arg::Text(label.as_str())), ("value", Arg::Text(value.as_str()))],
+                )
             }
-            _ => format!("[Unsupported card component: {}]", safe(kind)),
+            _ => i18n::say(
+                i18n::active(),
+                Key::UnsupportedComponent,
+                &[("kind", Arg::Text(&safe(kind)))],
+            ),
         };
         let supported = matches!(kind, "Row" | "Column" | "List" | "Card");
         if !text.is_empty() {
@@ -152,7 +193,7 @@ impl Card {
                     }
                 } else {
                     rows.push(Row {
-                        text: "[Repeated content unavailable in this terminal]".into(),
+                        text: i18n::text(i18n::active(), Key::RepeatedUnavailable).to_owned(),
                         control: None,
                     });
                 }
@@ -162,11 +203,15 @@ impl Card {
 }
 
 impl Cards {
-    pub(crate) fn summary(&self) -> Vec<ratatui::text::Line<'static>> {
+    pub(crate) fn summary(&self, locale: Locale) -> Vec<ratatui::text::Line<'static>> {
         let mut lines = Vec::new();
         for card in &self.rows {
-            lines
-                .push(ratatui::text::Line::from(format!("Card: {}  c=open", safe(&card.fallback))));
+            let fallback = safe(&card.fallback);
+            lines.push(ratatui::text::Line::from(i18n::say(
+                locale,
+                Key::CardSummary,
+                &[("fallback", Arg::Text(fallback.as_str()))],
+            )));
         }
         if let Some(notice) = &self.notice {
             lines.push(ratatui::text::Line::from(notice.clone()));
@@ -174,22 +219,31 @@ impl Cards {
         lines
     }
 
-    pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
+    pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect, locale: Locale) {
         let Some(card) = self.rows.get(self.selected) else {
             return;
         };
-        let mut lines = vec![format!(
-            "Card {}/{} — {}",
-            self.selected + 1,
-            self.rows.len(),
-            safe(&card.fallback)
+        let fallback = safe(&card.fallback);
+        let index = i18n::format_u64(
+            locale,
+            u64::try_from(self.selected.saturating_add(1)).unwrap_or(u64::MAX),
+        );
+        let total = i18n::format_u64(locale, u64::try_from(self.rows.len()).unwrap_or(u64::MAX));
+        let mut lines = vec![i18n::say(
+            locale,
+            Key::CardHeader,
+            &[
+                ("index", Arg::Text(index.as_str())),
+                ("total", Arg::Text(total.as_str())),
+                ("fallback", Arg::Text(fallback.as_str())),
+            ],
         )];
         if let Some(reason) = &card.unavailable {
             lines.push(reason.clone());
         }
         let mut control = 0;
         let mut selected_line = 0;
-        for row in card.rows() {
+        for row in card.rows(locale) {
             let marker = if row.control.is_some() {
                 let selected = control == self.control;
                 control += 1;
@@ -205,7 +259,8 @@ impl Cards {
             lines.push(format!("{marker}{}", row.text));
         }
         if let Some(text) = &self.editing {
-            lines.push(format!("Edit: {}  Enter=save Esc=cancel", safe(text)));
+            let shown = safe(text);
+            lines.push(i18n::say(locale, Key::EditLine, &[("text", Arg::Text(shown.as_str()))]));
             selected_line = lines.len();
         }
         if let Some(result) = &card.result {
@@ -221,7 +276,7 @@ impl Cards {
                 .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0))
                 .block(
                     Block::default()
-                        .title("Card  ↑↓=select Enter=act [ ]=card Esc=back")
+                        .title(i18n::text(locale, Key::CardChromeTitle))
                         .borders(Borders::ALL),
                 ),
             area,
