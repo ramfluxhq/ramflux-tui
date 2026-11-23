@@ -1,9 +1,11 @@
 name: CI
 
 on:
+  # Owner workflow 2026-11-23: CI gates only the next -> main promotion and main; next is verified by real runs.
   push:
-    branches: ["**"]
+    branches: ["main"]
   pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 # One group per ref: a newer push to a feature branch cancels the older run.
