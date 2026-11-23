@@ -70,15 +70,22 @@ async fn run_terminal_loop(
     bus: &mut SdkLocalBus,
     socket: &std::path::Path,
 ) -> Result<(), TuiError> {
+    let mut lock_check = tokio::time::Instant::now();
     while !app.should_quit() {
+        if lock_check.elapsed() >= Duration::from_secs(1) {
+            app.sync_lock_status(bus).await;
+            lock_check = tokio::time::Instant::now();
+        }
         match tokio::time::timeout(Duration::from_millis(1), bus.next_event()).await {
             Ok(Ok(event)) => {
                 if let Err(error) = app.apply_stream_event(bus, &event).await {
+                    app.sync_lock_status(bus).await;
                     app.note_stream_failure(&error);
                     reconnect(app, bus, socket).await;
                 }
             }
             Ok(Err(error)) => {
+                app.sync_lock_status(bus).await;
                 app.note_reconnecting(&error);
                 reconnect(app, bus, socket).await;
             }
@@ -114,6 +121,8 @@ fn account_key(code: crossterm::event::KeyCode) -> Option<ramflux_cli_pro::TuiIn
     match code {
         crossterm::event::KeyCode::Enter => Some(ramflux_cli_pro::TuiInput::Enter),
         crossterm::event::KeyCode::Esc => Some(ramflux_cli_pro::TuiInput::ExitCompose),
+        crossterm::event::KeyCode::Up => Some(ramflux_cli_pro::TuiInput::Up),
+        crossterm::event::KeyCode::Down => Some(ramflux_cli_pro::TuiInput::Down),
         crossterm::event::KeyCode::Backspace => Some(ramflux_cli_pro::TuiInput::Backspace),
         crossterm::event::KeyCode::Char(value) => Some(ramflux_cli_pro::TuiInput::Char(value)),
         _ => None,

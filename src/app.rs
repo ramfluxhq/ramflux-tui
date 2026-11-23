@@ -3,6 +3,10 @@
 
 #[path = "account_ui.rs"]
 mod account_ui;
+#[path = "session.rs"]
+mod session;
+
+use std::hash::BuildHasher as _;
 
 use crate::i18n::{self, Arg, Key};
 use crate::parsing::{
@@ -36,6 +40,9 @@ pub struct TuiApp {
     pub(crate) stream_cursors: std::collections::BTreeMap<String, u64>,
     account_ui: account_ui::AccountUi,
     socket: Option<std::path::PathBuf>,
+    pub(crate) content_locked: bool,
+    operation_namespace: String,
+    contact_peers: std::collections::BTreeMap<String, String>,
 }
 
 impl TuiApp {
@@ -49,6 +56,13 @@ impl TuiApp {
             stream_cursors: std::collections::BTreeMap::new(),
             account_ui: account_ui::AccountUi::default(),
             socket: None,
+            content_locked: false,
+            operation_namespace: format!(
+                "{:016x}{:016x}",
+                std::collections::hash_map::RandomState::new().hash_one(0_u8),
+                std::collections::hash_map::RandomState::new().hash_one(1_u8),
+            ),
+            contact_peers: std::collections::BTreeMap::new(),
         }
     }
 
@@ -112,6 +126,9 @@ impl TuiApp {
     /// # Errors
     /// Returns an error when any local bus projection request fails.
     pub async fn refresh_all<B: TuiBus + Send>(&mut self, bus: &mut B) -> Result<(), TuiError> {
+        if self.content_locked {
+            return Ok(());
+        }
         self.refresh_conversations(bus).await?;
         self.refresh_messages(bus).await?;
         self.subscribe_stream(bus).await?;
@@ -121,31 +138,6 @@ impl TuiApp {
         self.refresh_approvals(bus).await?;
         self.ensure_default_conversation();
         Ok(())
-    }
-
-    /// Opens account creation when the daemon has no account. Otherwise loads projections.
-    ///
-    /// The process default account id is the placeholder `default`. Scoping the
-    /// first projection read to that id exits with `AccountNotOpen` before the
-    /// terminal exists. An empty catalog skips those reads and shows creation.
-    ///
-    /// # Errors
-    /// Returns an error when `account.list` fails, or when an existing account's
-    /// projection refresh fails.
-    pub async fn start_session<B: TuiBus + Send>(&mut self, bus: &mut B) -> Result<(), TuiError> {
-        if self.account_catalog_empty(bus).await? {
-            self.begin_create();
-            return Ok(());
-        }
-        self.refresh_all(bus).await
-    }
-
-    async fn account_catalog_empty<B: TuiBus + Send>(
-        &mut self,
-        bus: &mut B,
-    ) -> Result<bool, TuiError> {
-        let listed = bus.request(None, "account", "account.list", serde_json::json!({})).await?;
-        Ok(catalog_has_no_account(&listed))
     }
 
     /// Opens local bus subscriptions used by live refresh.
@@ -166,6 +158,7 @@ impl TuiApp {
     /// `status_message` and leaves `should_quit` untouched.
     pub async fn dispatch_input<B: TuiBus + Send>(&mut self, bus: &mut B, input: TuiInput) {
         if let Err(error) = self.handle_input(bus, input).await {
+            self.sync_lock_status(bus).await;
             let detail = error.to_string();
             self.note_say(Key::StatusError, &[("detail", Arg::Text(detail.as_str()))]);
         }
@@ -180,6 +173,9 @@ impl TuiApp {
         bus: &mut B,
         input: TuiInput,
     ) -> Result<(), TuiError> {
+        if self.content_locked && !self.account_ui.is_open() {
+            self.show_locked();
+        }
         if self.account_ui.is_open() {
             return self.handle_account_input(bus, input).await;
         }
@@ -348,6 +344,10 @@ impl TuiApp {
         if self.account_ui.is_open() {
             self.render_account(frame, rows[1]);
             self.render_account_footer(frame, rows[2]);
+            return;
+        }
+        if self.content_locked {
+            frame.render_widget(Paragraph::new(self.text(Key::Locked)), rows[1]);
             return;
         }
         self.render_body(frame, rows[1]);
@@ -719,6 +719,18 @@ impl TuiApp {
                 serde_json::json!({}),
             )
             .await?;
+        self.contact_peers = response
+            .get("contacts")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                Some((
+                    row.get("link_id")?.as_str()?.to_owned(),
+                    row.get("root_commitment")?.as_str()?.to_owned(),
+                ))
+            })
+            .collect();
         self.state.contacts = parse_contacts(&response);
         Ok(())
     }
@@ -816,8 +828,13 @@ impl TuiApp {
         let conversation_id = self
             .selected_conversation()
             .map_or_else(|| DEFAULT_CONVERSATION_ID.to_owned(), |row| row.id.clone());
-        let operation_id = format!("tui-{}-{}", self.state.account_id, self.state.next_message_id);
-        self.state.next_message_id = self.state.next_message_id.saturating_add(1);
+        let operation_id =
+            format!("tui-{}-{}", self.operation_namespace, self.state.next_message_id);
+        self.state.next_message_id = self
+            .state
+            .next_message_id
+            .checked_add(1)
+            .ok_or_else(|| TuiError::ReadModel(self.text(Key::OpIdTooLong).to_owned()))?;
         if operation_id.len() > 256 {
             return Err(TuiError::ReadModel(self.text(Key::OpIdTooLong).to_owned()));
         }
@@ -1167,7 +1184,7 @@ impl TuiApp {
                 Some(self.state.account_id.clone()),
                 "contact",
                 "contact.safety_number",
-                serde_json::json!({"contact_identity_commitment": contact.target}),
+                serde_json::json!({"contact_identity_commitment": self.contact_peer(&contact)?}),
             )
             .await?;
         self.apply_contact_safety_response(&response);
@@ -1195,7 +1212,7 @@ impl TuiApp {
                 Some(self.state.account_id.clone()),
                 "contact",
                 "contact.verify",
-                serde_json::json!({"contact_identity_commitment": contact.target}),
+                serde_json::json!({"contact_identity_commitment": self.contact_peer(&contact)?}),
             )
             .await?;
         self.apply_contact_safety_response(&response);
@@ -1351,13 +1368,14 @@ impl TuiApp {
             .get("active_account_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or(account_id);
-        self.cards = crate::surface::Cards::default();
+        self.clear_content();
         active_account_id.clone_into(&mut self.state.account_id);
         self.state.selected_conversation = 0;
         self.state.selected_message = 0;
         self.state.selected_contact = 0;
         self.state.selected_group = 0;
         self.note_say(Key::ActiveAccount, &[("account", Arg::Text(active_account_id))]);
+        self.load_account_identity(bus).await?;
         self.refresh_all(bus).await?;
         Ok(())
     }
@@ -1682,27 +1700,21 @@ impl TuiApp {
     }
 
     fn apply_contact_safety_response(&mut self, response: &serde_json::Value) {
-        let Some(contact_id) =
-            response.get("contact_identity_commitment").and_then(serde_json::Value::as_str)
-        else {
+        let Some(selected) = self.state.contacts.get(self.state.selected_contact) else {
             return;
         };
-        let Some(contact) = self
-            .state
-            .contacts
-            .iter_mut()
-            .find(|contact| contact.target == contact_id || contact.requester == contact_id)
-        else {
+        let Ok(peer) = self.contact_peer(selected) else {
             return;
         };
-        contact.safety_number = response
-            .get("safety_number")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .collect();
+        if response.get("contact_identity_commitment").and_then(serde_json::Value::as_str)
+            != Some(peer)
+        {
+            return;
+        }
+        let Some(contact) = self.state.contacts.get_mut(self.state.selected_contact) else {
+            return;
+        };
+        contact.safety_number = crate::parsing::safety_number(response);
         contact.fingerprint_hex =
             response.get("fingerprint_hex").and_then(serde_json::Value::as_str).map(str::to_owned);
         response
@@ -2079,23 +2091,4 @@ fn ensure_no_extra_contact_arg(
         ))));
     }
     Ok(())
-}
-
-/// `account.list` with no open id and no stored account is the no-account state.
-/// A missing array counts as empty. A non-array field does not, so a changed
-/// shape still attempts the projection refresh.
-fn catalog_has_no_account(body: &serde_json::Value) -> bool {
-    let active = body.get("active_account_id").and_then(serde_json::Value::as_str);
-    if active.is_some_and(|id| !id.is_empty()) {
-        return false;
-    }
-    field_array_empty(body, "accounts") && field_array_empty(body, "account_details")
-}
-
-fn field_array_empty(body: &serde_json::Value, field: &str) -> bool {
-    match body.get(field) {
-        Some(serde_json::Value::Array(rows)) => rows.is_empty(),
-        Some(_) => false,
-        None => true,
-    }
 }

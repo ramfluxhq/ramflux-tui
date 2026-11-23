@@ -18,6 +18,9 @@ pub(crate) fn template(key: Key, category: Category) -> &'static str {
 
 fn account(key: Key) -> Option<&'static str> {
     Some(match key {
+        Key::ChooseAccount => "Choose an account",
+        Key::ChooseAccountHint => "Up/Down selects. Enter opens. Esc quits.",
+        Key::UnlockHint => "Enter unlocks. Esc clears the code.",
         Key::HintKeys => "L lock  N new  P change code  Y recover  G language",
         Key::HintConfirm => "Enter confirms. Esc cancels.",
         Key::HintHidePhrase => "Write the words down. Enter hides them.",
@@ -92,7 +95,7 @@ fn lines(key: Key) -> Option<&'static str> {
         Key::AttachmentsSuffix => " attachments=[{summary}]",
         Key::ReceiptsSuffix => " receipts=[{summary}]",
         Key::ContactLine => {
-            "{marker}{link} {requester} -> {target} {state} verify={verification} fp={fingerprint} sn={safety}"
+            "{marker}{link} {requester} -> {target} {state} verify={verification}\n  fp={fingerprint}\n  sn={safety}"
         }
         Key::DeviceLine => "{marker}device {id} epoch={epoch} target={target}",
         Key::GroupLine => {

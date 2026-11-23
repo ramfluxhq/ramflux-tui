@@ -104,6 +104,7 @@ impl TuiBus for MockBus {
                     "link_id": "friend_tui_1",
                     "requester_id": "alice",
                     "target_id": "bob",
+                    "root_commitment": "bob",
                     "state": "accepted",
                     "verification_state": "unverified"
                 }]

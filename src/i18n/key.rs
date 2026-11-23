@@ -15,7 +15,7 @@ macro_rules! keys {
 }
 
 keys! {
-    HintKeys, HintConfirm, HintHidePhrase, UnlockTitle, CreateNameTitle, CreatePhraseTitle,
+    ChooseAccount, ChooseAccountHint, UnlockHint, HintKeys, HintConfirm, HintHidePhrase, UnlockTitle, CreateNameTitle, CreatePhraseTitle,
     CreateCodeTitle, CreateRepeatTitle, RotateOldTitle, RotateNewTitle, RotateRepeatTitle,
     RecoverAnchorTitle, RecoverPhraseTitle, RecoverCodeTitle, WarningLabel, DigitsOnly,
     NotSixDigits, TrivialCode, CodeMismatch, NameRequired, NameTooLong, WordRequired,

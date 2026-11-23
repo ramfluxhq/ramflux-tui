@@ -76,14 +76,7 @@ pub(crate) fn parse_contacts(response: &serde_json::Value) -> Vec<ContactRow> {
             requester: string_field(contact, "requester_id", "requester"),
             target: string_field(contact, "target_id", "target"),
             state: string_field(contact, "state", "accepted"),
-            safety_number: contact
-                .get("safety_number")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .collect(),
+            safety_number: safety_number(contact),
             fingerprint_hex: contact
                 .get("fingerprint_hex")
                 .and_then(serde_json::Value::as_str)
@@ -164,4 +157,16 @@ pub(crate) fn parse_approval_row(approval: &serde_json::Value) -> ApprovalRow {
 
 pub(crate) fn string_field(value: &serde_json::Value, field: &str, default: &str) -> String {
     value.get(field).and_then(serde_json::Value::as_str).unwrap_or(default).to_owned()
+}
+
+/// Decimal groups from the SDK safety-number response.
+pub(crate) fn safety_number(response: &serde_json::Value) -> Vec<String> {
+    response
+        .get("safety_number")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect()
 }
