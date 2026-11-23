@@ -57,6 +57,15 @@ impl TuiApp {
         if event.account_id.as_deref() != Some(self.state.account_id.as_str()) {
             return Ok(());
         }
+        if event.method == "account.state" {
+            if event.body.get("state").and_then(serde_json::Value::as_str) != Some("unlocked") {
+                self.show_locked();
+            }
+            return Ok(());
+        }
+        if self.content_locked {
+            return Ok(());
+        }
         if event.method == "message.transient" {
             return Ok(());
         }

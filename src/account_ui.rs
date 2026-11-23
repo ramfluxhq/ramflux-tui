@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 //! Account creation, unlock, code rotation and recovery.
-//! Switch and idle never open these screens. Explicit lock does.
+//! Locked accounts always retain an unlock screen until successful authentication.
 
 use std::fmt::Write as _;
 
@@ -38,6 +38,7 @@ impl AccountUi {
 
 enum Mode {
     Closed,
+    Choose { accounts: Vec<super::session::CatalogAccount>, selected: usize },
     Unlock { entry: Zeroizing<String> },
     Create(Box<Create>),
     Rotate(Rotate),
@@ -130,6 +131,9 @@ impl TuiApp {
         bus: &mut B,
         input: TuiInput,
     ) -> Result<(), TuiError> {
+        if matches!(self.account_ui.mode, Mode::Choose { .. }) {
+            return self.handle_chooser_input(bus, input).await;
+        }
         match input {
             TuiInput::ExitCompose => self.cancel_account().await,
             TuiInput::Backspace => self.account_backspace(),
@@ -144,6 +148,45 @@ impl TuiApp {
             | TuiInput::Down
             | TuiInput::EnterCompose
             | TuiInput::Quit => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) fn show_locked(&mut self) {
+        self.clear_content();
+        self.content_locked = true;
+        self.open_account(Mode::Unlock { entry: Zeroizing::new(String::new()) });
+        self.note(Key::Locked);
+    }
+
+    pub(super) fn show_chooser(&mut self, accounts: Vec<super::session::CatalogAccount>) {
+        self.clear_content();
+        self.content_locked = true;
+        self.open_account(Mode::Choose { accounts, selected: 0 });
+    }
+
+    async fn handle_chooser_input<B: TuiBus + Send>(
+        &mut self,
+        bus: &mut B,
+        input: TuiInput,
+    ) -> Result<(), TuiError> {
+        let Mode::Choose { accounts, selected } = &mut self.account_ui.mode else {
+            return Ok(());
+        };
+        match input {
+            TuiInput::Up => *selected = selected.saturating_sub(1),
+            TuiInput::Down => {
+                *selected = selected.saturating_add(1).min(accounts.len().saturating_sub(1));
+            }
+            TuiInput::Enter => {
+                if let Some(row) = accounts.get(*selected) {
+                    self.state.account_id.clone_from(&row.id);
+                    self.account_ui.mode = Mode::Closed;
+                    self.open_session_account(bus).await?;
+                }
+            }
+            TuiInput::ExitCompose | TuiInput::Char('q') => self.should_quit = true,
+            _ => {}
         }
         Ok(())
     }
@@ -205,8 +248,7 @@ impl TuiApp {
             self.note_daemon(&error);
             return Ok(());
         }
-        self.open_account(Mode::Unlock { entry: Zeroizing::new(String::new()) });
-        self.note(Key::Locked);
+        self.show_locked();
         Ok(())
     }
 
@@ -236,6 +278,11 @@ impl TuiApp {
     }
 
     async fn cancel_account(&mut self) {
+        if let Mode::Unlock { entry } = &mut self.account_ui.mode {
+            entry.zeroize();
+            self.note(Key::Locked);
+            return;
+        }
         match std::mem::replace(&mut self.account_ui.mode, Mode::Closed) {
             Mode::Create(mut create) => {
                 if let Some(client) = create.client.as_mut() {
@@ -247,7 +294,7 @@ impl TuiApp {
                     let _ = client.cancel().await;
                 }
             }
-            Mode::Closed | Mode::Unlock { .. } | Mode::Rotate(_) => {}
+            Mode::Closed | Mode::Choose { .. } | Mode::Unlock { .. } | Mode::Rotate(_) => {}
         }
         self.note(Key::Cancelled);
     }
@@ -258,7 +305,7 @@ impl TuiApp {
             Mode::Create(create) => push_create(create, value),
             Mode::Rotate(rotate) => push_digit(&mut rotate.draft, value),
             Mode::Recover(recover) => push_recover(recover, value),
-            Mode::Closed => None,
+            Mode::Closed | Mode::Choose { .. } => None,
         };
         match outcome {
             Some(key) => self.note(key),
@@ -291,7 +338,7 @@ impl TuiApp {
                     recover.draft.pop();
                 }
             },
-            Mode::Closed => {}
+            Mode::Closed | Mode::Choose { .. } => {}
         }
         self.state.status_message = None;
     }
@@ -302,7 +349,7 @@ impl TuiApp {
             Mode::Create(_) => self.submit_create(bus).await,
             Mode::Rotate(_) => self.submit_rotate(bus).await,
             Mode::Recover(_) => self.submit_recover(bus).await,
-            Mode::Closed => Ok(()),
+            Mode::Closed | Mode::Choose { .. } => Ok(()),
         }
     }
 
@@ -328,8 +375,10 @@ impl TuiApp {
             entry.zeroize();
         }
         result?;
+        self.content_locked = false;
         self.account_ui.mode = Mode::Closed;
         self.note(Key::Unlocked);
+        self.load_account_identity(bus).await?;
         if let Err(error) = self.refresh_all(bus).await {
             self.note_daemon(&error);
         }
@@ -493,6 +542,8 @@ impl TuiApp {
         match outcome {
             Ok(created) => {
                 self.state.account_id.clone_from(&created.account_id);
+                self.content_locked = false;
+                self.load_account_identity(bus).await?;
                 self.note(Key::Created);
                 if let Err(error) = self.refresh_all(bus).await {
                     self.note_daemon(&error);
@@ -691,6 +742,7 @@ impl TuiApp {
 
     fn account_title(&self, locale: Locale) -> String {
         let key = match &self.account_ui.mode {
+            Mode::Choose { .. } => Key::ChooseAccount,
             Mode::Unlock { .. } | Mode::Closed => Key::UnlockTitle,
             Mode::Create(create) => match create.step {
                 CreateStep::Name => Key::CreateNameTitle,
@@ -719,6 +771,14 @@ impl TuiApp {
 
     fn account_body(&self, locale: Locale) -> String {
         match &self.account_ui.mode {
+            Mode::Choose { accounts, selected } => accounts
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    format!("{} {} {}", if i == *selected { ">" } else { " " }, row.name, row.id)
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
             Mode::Create(create) => create
                 .phrase
                 .as_ref()
@@ -740,6 +800,12 @@ impl TuiApp {
     }
 
     fn account_hint(&self, locale: Locale) -> &'static str {
+        if matches!(self.account_ui.mode, Mode::Choose { .. }) {
+            return i18n::text(locale, Key::ChooseAccountHint);
+        }
+        if matches!(self.account_ui.mode, Mode::Unlock { .. }) {
+            return i18n::text(locale, Key::UnlockHint);
+        }
         let hide = matches!(
             &self.account_ui.mode,
             Mode::Create(create) if matches!(create.step, CreateStep::Phrase)
@@ -763,7 +829,7 @@ impl TuiApp {
                 RecoverStep::Phrase => mask_phrase(&recover.draft),
                 RecoverStep::Code => mask(recover.draft.len()),
             },
-            Mode::Closed => String::new(),
+            Mode::Closed | Mode::Choose { .. } => String::new(),
         }
     }
 }

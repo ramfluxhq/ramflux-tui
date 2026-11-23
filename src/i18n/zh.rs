@@ -18,6 +18,9 @@ pub(crate) fn template(key: Key, _category: super::Category) -> &'static str {
 
 fn account(key: Key) -> Option<&'static str> {
     Some(match key {
+        Key::ChooseAccount => "选择账户",
+        Key::ChooseAccountHint => "上下键选择。回车打开。Esc 退出。",
+        Key::UnlockHint => "回车解锁。Esc 清除口令。",
         Key::HintKeys => "L 锁定  N 新建  P 修改口令  Y 恢复  G 语言",
         Key::HintConfirm => "回车确认。Esc 取消。",
         Key::HintHidePhrase => "请抄下这些词。回车后隐藏。",
@@ -90,7 +93,7 @@ fn lines(key: Key) -> Option<&'static str> {
         Key::AttachmentsSuffix => " 附件=[{summary}]",
         Key::ReceiptsSuffix => " 回执=[{summary}]",
         Key::ContactLine => {
-            "{marker}{link} {requester} -> {target} {state} 验证={verification} 指纹={fingerprint} 安全码={safety}"
+            "{marker}{link} {requester} -> {target} {state} 验证={verification}\n  指纹={fingerprint}\n  安全码={safety}"
         }
         Key::DeviceLine => "{marker}设备 {id} 纪元={epoch} 目标={target}",
         Key::GroupLine => "{marker}{id} 成员={members} 阅后即焚={disappearing} 静音至={mute}",
