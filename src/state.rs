@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Span Brain
 
 use crate::DEFAULT_ACCOUNT_ID;
-use crate::i18n::Locale;
+use crate::i18n::{self, Key, Locale};
 
 /// Top-level TUI panel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -16,15 +16,16 @@ pub enum Panel {
 }
 
 impl Panel {
-    pub(crate) fn title(self) -> &'static str {
-        match self {
-            Self::Conversations => "Conversations",
-            Self::Messages => "Messages",
-            Self::Objects => "Objects",
-            Self::Contacts => "Contacts",
-            Self::Groups => "Groups",
-            Self::Approvals => "Approvals",
-        }
+    pub(crate) fn title(self, locale: Locale) -> &'static str {
+        let key = match self {
+            Self::Conversations => Key::PanelConversations,
+            Self::Messages => Key::PanelMessages,
+            Self::Objects => Key::PanelObjects,
+            Self::Contacts => Key::PanelContacts,
+            Self::Groups => Key::PanelGroups,
+            Self::Approvals => Key::PanelApprovals,
+        };
+        i18n::text(locale, key)
     }
 
     pub(crate) fn next(self) -> Self {
@@ -228,7 +229,7 @@ pub struct TuiState {
     pub approvals: Vec<ApprovalRow>,
     pub selected_approval: usize,
     pub status_message: Option<String>,
-    /// Account-screen language. Panel copy outside those screens stays as written.
+    /// Interface language. English when unset.
     pub locale: Locale,
     pub(crate) next_message_id: u64,
 }

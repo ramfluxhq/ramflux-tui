@@ -46,7 +46,7 @@ Only cards authorized by the daemon as the user's own agents are interactive.
 Other authors retain text fallback. Unsupported components, repeated templates,
 display functions and link buttons show a clear placeholder. This terminal does
 not open external links. Closed and out-of-sync cards have no active controls.
-Card copy follows this client's existing English UI; it has no i18n catalog.
+Card copy and the rest of the interface use the English and zh-CN catalogs.
 
 The retired renderer is removed. Obsolete group ban, invite and
 group-message tombstone helpers, restored-device activation and manual sync import

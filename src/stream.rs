@@ -136,7 +136,9 @@ impl TuiApp {
     ) -> Result<(), TuiError> {
         let response = match response {
             Err(error) if is_schema_reset(&error) => {
-                self.state.status_message = Some("schema_reset_required".to_owned());
+                self.state.status_message = Some(
+                    crate::i18n::text(self.state.locale, crate::i18n::Key::SchemaReset).to_owned(),
+                );
                 return Ok(());
             }
             other => other?,

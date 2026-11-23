@@ -719,17 +719,20 @@ impl TuiApp {
 
     fn account_body(&self, locale: Locale) -> String {
         match &self.account_ui.mode {
-            Mode::Create(create) => {
-                create.phrase.as_ref().map(|phrase| numbered(phrase)).unwrap_or_default()
-            }
-            Mode::Recover(recover) if matches!(recover.step, RecoverStep::Anchor) => {
-                format!(
-                    "{}\n{}\n\n{}",
-                    i18n::text(locale, Key::WarningLabel),
-                    recover.warning,
-                    recover.anchor
-                )
-            }
+            Mode::Create(create) => create
+                .phrase
+                .as_ref()
+                .map(|phrase| i18n::numbered_phrase(locale, phrase))
+                .unwrap_or_default(),
+            Mode::Recover(recover) if matches!(recover.step, RecoverStep::Anchor) => i18n::say(
+                locale,
+                Key::RecoverWarning,
+                &[
+                    ("label", i18n::Arg::Text(i18n::text(locale, Key::WarningLabel))),
+                    ("warning", i18n::Arg::Text(recover.warning.as_str())),
+                    ("anchor", i18n::Arg::Text(recover.anchor.as_str())),
+                ],
+            ),
             Mode::Unlock { .. } | Mode::Rotate(_) | Mode::Recover(_) | Mode::Closed => {
                 String::new()
             }
@@ -862,13 +865,4 @@ fn mask(len: usize) -> String {
 
 fn mask_phrase(value: &str) -> String {
     value.chars().map(|ch| if ch == ' ' { ' ' } else { '*' }).collect()
-}
-
-fn numbered(phrase: &str) -> String {
-    let mut out = String::new();
-    for (index, word) in phrase.split_whitespace().enumerate() {
-        let position = index.saturating_add(1);
-        let _ = writeln!(out, "{position:>2}. {word}");
-    }
-    out
 }

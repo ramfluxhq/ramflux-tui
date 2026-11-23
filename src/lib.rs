@@ -13,13 +13,10 @@ mod surface;
 #[cfg(test)]
 mod tests;
 
-/// Shared product version and build commit, for example `0.2.0 (build abcdef123456)`.
-pub const VERSION: &str =
-    concat!(env!("CARGO_PKG_VERSION"), " (build ", env!("RAMFLUX_TUI_BUILD"), ")");
-
 pub use app::TuiApp;
 pub use bus::{SdkLocalBus, TuiBus};
 pub use error::TuiError;
+pub use i18n::{VERSION, about, lang_help, resolve_locale, version_line};
 pub use state::{
     ApprovalRow, AttachmentRow, ContactRow, ConversationRow, DeviceRow, GroupRow, InputMode,
     MessageReceiptRow, MessageRow, ObjectTransferRow, Panel, PendingAttachment, TuiInput, TuiState,
