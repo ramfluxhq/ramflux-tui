@@ -7,6 +7,11 @@ Versioning.
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-11-25
+
+- Align release metadata with product version 0.2.8.
+- Hide content while the app is locked; open the right account; first send after a restart; safety-code lookup.
+
 ## [0.2.6] - 2026-11-23
 
 - Align release metadata with product version 0.2.6.
