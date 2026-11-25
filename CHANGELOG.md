@@ -7,6 +7,10 @@ Versioning.
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-11-25
+
+- Align release metadata with product version 0.2.9.
+
 ## [0.2.8] - 2026-11-25
 
 - Align release metadata with product version 0.2.8.
